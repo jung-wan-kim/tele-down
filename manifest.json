@@ -32,7 +32,7 @@
   "web_accessible_resources": [
     {
       "matches": ["https://web.telegram.org/*"],
-      "resources": ["src/inject/downloader.ts"]
+      "resources": ["inject/downloader.js"]
     }
   ]
 }

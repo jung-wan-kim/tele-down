@@ -143,6 +143,32 @@ details[open] .chevron { transform: rotate(90deg); }
 }
 .folder-hint b { color: var(--accent); }
 
+/* Save button */
+.btn-save {
+  width: 100%;
+  padding: 8px 0;
+  margin-top: 8px;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--bg-primary);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-save:hover { background: var(--accent-hover); }
+.btn-save:active { transform: scale(0.98); }
+
+.save-feedback {
+  text-align: center;
+  font-size: 12px;
+  color: var(--success);
+  padding: 4px 0;
+  transition: opacity 0.3s;
+}
+.save-feedback.hidden { display: none; }
+
 /* ============================================================
    Download List
    ============================================================ */

@@ -27,6 +27,8 @@ const parallelChunksInput = $<HTMLInputElement>('parallelChunks');
 const parallelDownloadsInput = $<HTMLInputElement>('parallelDownloads');
 const autoRetryInput = $<HTMLInputElement>('autoRetry');
 const maxRetriesInput = $<HTMLInputElement>('maxRetries');
+const btnSaveSettings = $<HTMLButtonElement>('btnSaveSettings');
+const saveFeedback = $<HTMLDivElement>('saveFeedback');
 
 // ============================================================
 // State
@@ -34,7 +36,6 @@ const maxRetriesInput = $<HTMLInputElement>('maxRetries');
 
 const downloads = new Map<string, DownloadProgress>();
 let currentSettings: ExtensionSettings = { ...DEFAULT_SETTINGS };
-let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // ============================================================
 // Status
@@ -162,58 +163,62 @@ async function loadSettings(): Promise<void> {
   applySettingsToUI(currentSettings);
 }
 
-/** Debounced save + broadcast to content script */
-function scheduleSettingsSave(): void {
-  if (saveTimeout) clearTimeout(saveTimeout);
-  saveTimeout = setTimeout(async () => {
-    try {
-      await chrome.runtime.sendMessage({ action: 'saveSettings', data: currentSettings });
+/** Read all current form values into currentSettings */
+function readFormValues(): void {
+  currentSettings.autoDownload = autoDownloadInput.checked;
+  currentSettings.downloadFolder = downloadFolderInput.value.trim() || 'TeleDown';
+  currentSettings.parallelChunks = parseInt(parallelChunksInput.value, 10) || 20;
+  currentSettings.parallelDownloads = parseInt(parallelDownloadsInput.value, 10) || 3;
+  currentSettings.autoRetry = autoRetryInput.checked;
+  currentSettings.maxRetries = parseInt(maxRetriesInput.value, 10) || 3;
+}
 
-      // Broadcast to all Telegram Web tabs
-      const tabs = await chrome.tabs.query({ url: 'https://web.telegram.org/*' });
-      for (const tab of tabs) {
-        if (tab.id) {
-          chrome.tabs.sendMessage(tab.id, {
-            type: 'settingsUpdated',
-            data: currentSettings,
-          }).catch(() => {});
-        }
+/** Save settings and broadcast to all Telegram Web tabs */
+async function saveAndBroadcast(): Promise<void> {
+  readFormValues();
+  try {
+    await chrome.runtime.sendMessage({ action: 'saveSettings', data: currentSettings });
+
+    // Broadcast to all Telegram Web tabs
+    const tabs = await chrome.tabs.query({ url: 'https://web.telegram.org/*' });
+    for (const tab of tabs) {
+      if (tab.id) {
+        chrome.tabs.sendMessage(tab.id, {
+          type: 'settingsUpdated',
+          data: currentSettings,
+        }).catch(() => {});
       }
-    } catch { /* Ignore */ }
-  }, 500);
+    }
+  } catch { /* Ignore */ }
+}
+
+function showSaveFeedback(): void {
+  saveFeedback.classList.remove('hidden');
+  setTimeout(() => saveFeedback.classList.add('hidden'), 1500);
 }
 
 function setupSettingsListeners(): void {
-  autoDownloadInput.addEventListener('change', () => {
-    currentSettings.autoDownload = autoDownloadInput.checked;
-    scheduleSettingsSave();
+  // Auto-download & folder: save immediately on change (quick settings)
+  autoDownloadInput.addEventListener('change', async () => {
+    await saveAndBroadcast();
+    showSaveFeedback();
   });
 
   downloadFolderInput.addEventListener('input', () => {
-    const val = downloadFolderInput.value.trim() || 'TeleDown';
-    currentSettings.downloadFolder = val;
-    folderPreview.textContent = val;
-    scheduleSettingsSave();
+    folderPreview.textContent = downloadFolderInput.value.trim() || 'TeleDown';
   });
 
-  parallelChunksInput.addEventListener('change', () => {
-    currentSettings.parallelChunks = parseInt(parallelChunksInput.value, 10) || 20;
-    scheduleSettingsSave();
+  downloadFolderInput.addEventListener('change', async () => {
+    await saveAndBroadcast();
+    showSaveFeedback();
   });
 
-  parallelDownloadsInput.addEventListener('change', () => {
-    currentSettings.parallelDownloads = parseInt(parallelDownloadsInput.value, 10) || 3;
-    scheduleSettingsSave();
-  });
-
-  autoRetryInput.addEventListener('change', () => {
-    currentSettings.autoRetry = autoRetryInput.checked;
-    scheduleSettingsSave();
-  });
-
-  maxRetriesInput.addEventListener('change', () => {
-    currentSettings.maxRetries = parseInt(maxRetriesInput.value, 10) || 3;
-    scheduleSettingsSave();
+  // Save button for advanced settings
+  btnSaveSettings.addEventListener('click', async () => {
+    await saveAndBroadcast();
+    showSaveFeedback();
+    btnSaveSettings.textContent = '저장 완료!';
+    setTimeout(() => { btnSaveSettings.textContent = '설정 저장'; }, 1500);
   });
 }
 

@@ -230,10 +230,9 @@ function injectDownloaderScript(): void {
   if (downloaderInjected) return;
   downloaderInjected = true;
 
-  const scriptUrl = chrome.runtime.getURL('src/inject/downloader.ts');
+  const scriptUrl = chrome.runtime.getURL('inject/downloader.js');
   const script = document.createElement('script');
   script.src = scriptUrl;
-  script.type = 'module';
   script.onload = () => {
     script.remove();
     // Send settings after injection
