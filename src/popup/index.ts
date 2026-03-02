@@ -20,7 +20,7 @@ const emptyState = $<HTMLDivElement>('emptyState');
 // Quick settings
 const autoDownloadInput = $<HTMLInputElement>('autoDownload');
 const downloadFolderInput = $<HTMLInputElement>('downloadFolder');
-const folderPreview = $<HTMLSpanElement>('folderPreview');
+const folderFullPath = $<HTMLSpanElement>('folderFullPath');
 
 // Advanced settings
 const parallelChunksInput = $<HTMLInputElement>('parallelChunks');
@@ -36,6 +36,7 @@ const saveFeedback = $<HTMLDivElement>('saveFeedback');
 
 const downloads = new Map<string, DownloadProgress>();
 let currentSettings: ExtensionSettings = { ...DEFAULT_SETTINGS };
+let defaultDownloadPath = '';
 
 // ============================================================
 // Status
@@ -143,14 +144,74 @@ async function loadDownloads(): Promise<void> {
 // Settings
 // ============================================================
 
+/** Get the default download directory path via chrome.downloads API */
+async function detectDownloadPath(): Promise<void> {
+  try {
+    // Use a temporary download to detect the default path (cancelled immediately)
+    // Alternative: use platform info to build the path
+    const platformInfo = await chrome.runtime.getPlatformInfo();
+    const isWindows = platformInfo.os === 'win';
+    const isMac = platformInfo.os === 'mac';
+
+    if (isWindows) {
+      // Windows: C:\Users\<username>\Downloads
+      // We can't get the exact username, but chrome.downloads.download
+      // returns the full path. Use a simpler approach with env hint.
+      defaultDownloadPath = 'C:\\Users\\<사용자>\\Downloads';
+    } else if (isMac) {
+      defaultDownloadPath = '/Users/<사용자>/Downloads';
+    } else {
+      defaultDownloadPath = '~/Downloads';
+    }
+
+    // Try to get actual path using a dummy download trick
+    try {
+      const downloadId = await chrome.downloads.download({
+        url: 'data:text/plain,test',
+        filename: '.tele-down-path-detect.tmp',
+        conflictAction: 'uniquify',
+      });
+
+      const items = await new Promise<chrome.downloads.DownloadItem[]>((resolve) => {
+        chrome.downloads.search({ id: downloadId }, resolve);
+      });
+
+      if (items.length > 0 && items[0].filename) {
+        // Extract the Downloads directory from the full path
+        const fullPath = items[0].filename;
+        const sep = fullPath.includes('\\') ? '\\' : '/';
+        const parts = fullPath.split(sep);
+        // Remove the filename to get the Downloads dir
+        parts.pop();
+        defaultDownloadPath = parts.join(sep);
+      }
+
+      // Cancel and remove the temp download
+      chrome.downloads.cancel(downloadId);
+      chrome.downloads.removeFile(downloadId);
+      chrome.downloads.erase({ id: downloadId });
+    } catch {
+      // Permission or other error, use the guessed path
+    }
+  } catch {
+    defaultDownloadPath = 'Downloads';
+  }
+}
+
+function updateFolderPathDisplay(): void {
+  const folder = downloadFolderInput.value.trim() || 'TeleDown';
+  const sep = defaultDownloadPath.includes('\\') ? '\\' : '/';
+  folderFullPath.textContent = `${defaultDownloadPath}${sep}${folder}${sep}`;
+}
+
 function applySettingsToUI(settings: ExtensionSettings): void {
   autoDownloadInput.checked = settings.autoDownload;
   downloadFolderInput.value = settings.downloadFolder;
-  folderPreview.textContent = settings.downloadFolder || 'TeleDown';
   parallelChunksInput.value = String(settings.parallelChunks);
   parallelDownloadsInput.value = String(settings.parallelDownloads);
   autoRetryInput.checked = settings.autoRetry;
   maxRetriesInput.value = String(settings.maxRetries);
+  updateFolderPathDisplay();
 }
 
 async function loadSettings(): Promise<void> {
@@ -205,7 +266,7 @@ function setupSettingsListeners(): void {
   });
 
   downloadFolderInput.addEventListener('input', () => {
-    folderPreview.textContent = downloadFolderInput.value.trim() || 'TeleDown';
+    updateFolderPathDisplay();
   });
 
   downloadFolderInput.addEventListener('change', async () => {
@@ -239,7 +300,8 @@ chrome.runtime.onMessage.addListener((message) => {
 // ============================================================
 
 async function init(): Promise<void> {
-  await Promise.all([updateStatus(), loadSettings(), loadDownloads()]);
+  await Promise.all([updateStatus(), loadSettings(), loadDownloads(), detectDownloadPath()]);
+  updateFolderPathDisplay();
   setupSettingsListeners();
   renderDownloads();
 }
