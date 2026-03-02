@@ -278,13 +278,16 @@ function getScrollContainer(): HTMLElement | null {
 }
 
 /**
- * Auto-scroll through the entire chat, detect all videos, then download.
+ * Auto-scroll through the entire chat history, detect all videos, then download.
+ *
+ * Chat scrolls UPWARD to load older messages (newest at bottom, oldest at top).
  *
  * Strategy:
- * 1. Scroll to the top of the current loaded messages
- * 2. Scroll down step-by-step (70% viewport per step)
- * 3. At each step, scan for video containers
- * 4. After reaching the bottom, resolve URLs and start downloads
+ * 1. Scan at current position (bottom — newest messages)
+ * 2. Scroll UP step-by-step to discover older messages
+ * 3. At each step, wait for Telegram's lazy loading, then scan
+ * 4. When top is reached (scrollTop=0) and no more history loads, stop
+ * 5. Scroll back to bottom, then start downloading all detected videos
  */
 async function autoScrollAndDownload(): Promise<void> {
   if (isScanning) return;
@@ -301,65 +304,79 @@ async function autoScrollAndDownload(): Promise<void> {
   scanProgress = 0;
   updateControlPanel(computePanelState());
 
-  console.log('[TeleDown] Auto-scroll scan started');
+  console.log('[TeleDown] Auto-scroll scan started (scrolling UP through history)');
 
-  // Save original scroll position to restore later if needed
-  const originalScrollTop = scrollContainer.scrollTop;
+  // The starting position is at the bottom (most recent messages)
+  const startScrollTop = scrollContainer.scrollTop;
 
   try {
-    // Step 1: Scroll to top
-    scrollContainer.scrollTop = 0;
-    await sleep(800);
+    // Step 1: Scan at current position (bottom)
+    processScannedVideos();
 
     if (scanAborted) return;
 
-    // Step 2: Scan at top position
-    processScannedVideos();
-
-    // Step 3: Scroll down step-by-step
+    // Step 2: Scroll UP step-by-step
     const viewportHeight = scrollContainer.clientHeight;
     const scrollStep = Math.max(viewportHeight * 0.7, 200);
 
     let lastScrollHeight = scrollContainer.scrollHeight;
+    let lastScrollTop = scrollContainer.scrollTop;
     let stuckCount = 0;
+    let totalScrolledUp = 0;
 
     while (!scanAborted) {
-      const maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
-      const currentScroll = scrollContainer.scrollTop;
+      const currentScrollTop = scrollContainer.scrollTop;
 
-      // Update progress
-      scanProgress = maxScroll > 0 ? Math.min(99, (currentScroll / maxScroll) * 100) : 99;
+      // Update progress: how much of the chat we've scrolled through
+      // startScrollTop is total scrollable distance from top to our start position
+      if (startScrollTop > 0) {
+        totalScrolledUp = startScrollTop - currentScrollTop;
+        scanProgress = Math.min(99, (totalScrolledUp / startScrollTop) * 100);
+      } else {
+        scanProgress = 99;
+      }
       updateControlPanel(computePanelState());
 
-      // Check if we've reached the bottom
-      if (currentScroll >= maxScroll - 5) {
-        // Double-check: wait a bit and see if more content loaded
-        await sleep(500);
-        const newMaxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
-        if (scrollContainer.scrollTop >= newMaxScroll - 5) break;
+      // Check if we've reached the top
+      if (currentScrollTop <= 0) {
+        // Wait to see if Telegram loads more older messages
+        await sleep(1500);
+        const newScrollHeight = scrollContainer.scrollHeight;
+        if (newScrollHeight <= lastScrollHeight + 100) {
+          // No new content loaded — we've reached the oldest messages
+          break;
+        }
+        // More history loaded: scrollHeight grew, scrollTop may have shifted
+        // Continue scanning
+        lastScrollHeight = newScrollHeight;
       }
 
-      // Scroll down one step
-      scrollContainer.scrollTop = Math.min(currentScroll + scrollStep, maxScroll);
-      await sleep(600);
+      // Scroll UP one step
+      const targetScrollTop = Math.max(0, currentScrollTop - scrollStep);
+      scrollContainer.scrollTop = targetScrollTop;
+
+      // Wait for Telegram to lazy-load video src + potentially load older messages
+      await sleep(800);
 
       if (scanAborted) break;
 
       // Scan for videos at current position
       processScannedVideos();
 
-      // Detect if we're stuck (no new content loading, no scroll change)
-      if (scrollContainer.scrollHeight === lastScrollHeight &&
-          Math.abs(scrollContainer.scrollTop - currentScroll) < 5) {
+      // Detect if we're stuck (scroll didn't move AND no new content)
+      if (Math.abs(scrollContainer.scrollTop - lastScrollTop) < 5 &&
+          scrollContainer.scrollHeight === lastScrollHeight) {
         stuckCount++;
         if (stuckCount >= 3) break;
       } else {
         stuckCount = 0;
       }
+
+      lastScrollTop = scrollContainer.scrollTop;
       lastScrollHeight = scrollContainer.scrollHeight;
     }
 
-    // Final scan at bottom
+    // Final scan at topmost position
     if (!scanAborted) {
       processScannedVideos();
     }
@@ -373,7 +390,7 @@ async function autoScrollAndDownload(): Promise<void> {
     scanProgress = 0;
     updateControlPanel(computePanelState());
 
-    // Scroll back to bottom (natural position for chat)
+    // Scroll back to bottom (most recent messages — natural chat position)
     scrollContainer.scrollTop = scrollContainer.scrollHeight;
   }
 
@@ -459,15 +476,10 @@ function onVideosDetected(videos: DetectedVideo[]): void {
   // Show / update panel
   showControlPanel(computePanelState());
 
-  // Auto-download newly detected videos that have URLs
-  if (settings.autoDownload && newlyAdded > 0) {
-    const newVideos = videos.filter((v) => {
-      const item = videoQueue.get(v.videoId);
-      return item?.status === 'pending' && item.videoUrl;
-    });
-    newVideos.forEach((v, i) => {
-      setTimeout(() => requestDownload(v.videoUrl, v.videoId), i * 1000);
-    });
+  // Auto-download: if enabled and new videos found, auto-scroll + download
+  if (settings.autoDownload && newlyAdded > 0 && !isScanning) {
+    // Start auto-scroll scan + download (non-blocking)
+    autoScrollAndDownload();
   }
 }
 
@@ -533,15 +545,27 @@ function onStartDownloadClick(): void {
   autoScrollAndDownload();
 }
 
+function onClearHistory(): void {
+  videoQueue.clear();
+  clearSeenVideos();
+  downloadCounter = 0;
+
+  // Remove all download buttons from DOM
+  document.querySelectorAll('.tele-down-btn').forEach((btn) => btn.remove());
+
+  updateControlPanel(computePanelState());
+  console.log('[TeleDown] Download history cleared');
+}
+
 function onAutoDownloadToggle(enabled: boolean): void {
   settings.autoDownload = enabled;
   saveSettings();
   updateControlPanel(computePanelState());
 
-  // If just enabled, start downloading pending videos
+  // If just enabled, auto-scroll + download
   if (enabled) {
     broadcastSettings();
-    startAllPendingDownloads();
+    autoScrollAndDownload();
   }
 }
 
@@ -612,7 +636,7 @@ async function init(): Promise<void> {
   setDownloadHandler(requestDownload);
 
   // Setup panel callbacks
-  setControlPanelCallbacks(onStartDownloadClick, onAutoDownloadToggle, stopScanning);
+  setControlPanelCallbacks(onStartDownloadClick, onAutoDownloadToggle, stopScanning, onClearHistory);
 
   // Watch for URL changes (chat navigation)
   setupUrlWatcher();

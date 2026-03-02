@@ -268,6 +268,21 @@ const STYLES = `
   border-radius: 2px;
   transition: width 0.3s ease;
 }
+
+.tdp-btn-clear {
+  width: 100%;
+  padding: 7px 0;
+  margin-top: 6px;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  color: #6c6c80;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.tdp-btn-clear:hover { background: rgba(255,255,255,0.05); color: #a0a0b0; }
 `;
 
 let styleInjected = false;
@@ -409,20 +424,24 @@ export interface PanelState {
 type StartDownloadCallback = () => void;
 type AutoDownloadToggleCallback = (enabled: boolean) => void;
 type StopScanCallback = () => void;
+type ClearCallback = () => void;
 
 let panel: HTMLElement | null = null;
 let onStartDownload: StartDownloadCallback | null = null;
 let onAutoDownloadToggle: AutoDownloadToggleCallback | null = null;
 let onStopScan: StopScanCallback | null = null;
+let onClear: ClearCallback | null = null;
 
 export function setControlPanelCallbacks(
   onStart: StartDownloadCallback,
   onToggle: AutoDownloadToggleCallback,
   onStop?: StopScanCallback,
+  onClearHistory?: ClearCallback,
 ): void {
   onStartDownload = onStart;
   onAutoDownloadToggle = onToggle;
   onStopScan = onStop ?? null;
+  onClear = onClearHistory ?? null;
 }
 
 export function showControlPanel(state: PanelState): void {
@@ -485,6 +504,7 @@ export function showControlPanel(state: PanelState): void {
         ${btnHtml}
       </button>
       ${isScanning ? '<button class="tdp-btn-stop" id="tdp-stop-btn">스캔 중지</button>' : ''}
+      ${!isScanning && state.totalDetected > 0 ? '<button class="tdp-btn-clear" id="tdp-clear-btn">기록 초기화</button>' : ''}
     </div>
   `;
 
@@ -506,6 +526,10 @@ export function showControlPanel(state: PanelState): void {
   panel.querySelector('#tdp-auto-toggle')?.addEventListener('change', (e) => {
     const checked = (e.target as HTMLInputElement).checked;
     onAutoDownloadToggle?.(checked);
+  });
+
+  panel.querySelector('#tdp-clear-btn')?.addEventListener('click', () => {
+    onClear?.();
   });
 }
 
