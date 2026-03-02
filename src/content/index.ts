@@ -76,14 +76,13 @@ async function saveSettings(): Promise<void> {
 
 /** Broadcast current settings to the injected page script */
 function broadcastSettings(): void {
-  document.dispatchEvent(
-    new CustomEvent('tele_down_settings', {
-      detail: {
-        downloadFolder: settings.downloadFolder,
-        parallelChunks: settings.parallelChunks,
-      },
-    }),
-  );
+  // Use window.postMessage (NOT CustomEvent) to cross Chrome's world boundary
+  // CustomEvent.detail may be null across isolated world → page context
+  window.postMessage({
+    type: 'tele_down_settings',
+    downloadFolder: settings.downloadFolder,
+    parallelChunks: settings.parallelChunks,
+  }, '*');
 }
 
 // ============================================================

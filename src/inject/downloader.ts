@@ -25,10 +25,14 @@ let currentSettings: InjectSettings = {
   parallelChunks: 2,
 };
 
-document.addEventListener('tele_down_settings', ((e: CustomEvent<InjectSettings>) => {
-  currentSettings = { ...currentSettings, ...e.detail };
+// Use window.postMessage (NOT CustomEvent) — CustomEvent.detail is null across Chrome world boundary
+window.addEventListener('message', (e: MessageEvent) => {
+  if (e.source !== window || e.data?.type !== 'tele_down_settings') return;
+  const { downloadFolder, parallelChunks } = e.data;
+  if (downloadFolder !== undefined) currentSettings.downloadFolder = downloadFolder;
+  if (parallelChunks !== undefined) currentSettings.parallelChunks = parallelChunks;
   console.log('[TeleDown] Settings updated:', currentSettings);
-}) as EventListener);
+});
 
 // ============================================================
 // Types
@@ -253,7 +257,7 @@ async function downloadSegmented(
   const info = await probeSegmentInfo(url);
   const ext = info.contentType.split('/')[1] || 'mp4';
   const fileName = extractFileName(url, videoId, ext);
-  const batchSize = Math.max(1, Math.min(currentSettings.parallelChunks || 2, 6));
+  const batchSize = Math.max(1, currentSettings.parallelChunks || 2);
 
   logger.info(
     `Download: ${info.segmentCount} segments, ${formatBytes(info.contentSize)}, batch=${batchSize}`,
