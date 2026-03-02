@@ -3,7 +3,7 @@
   // src/inject/downloader.ts
   var currentSettings = {
     downloadFolder: "TeleDown",
-    parallelChunks: 20
+    parallelChunks: 4
   };
   document.addEventListener("tele_down_settings", ((e) => {
     currentSettings = { ...currentSettings, ...e.detail };
@@ -13,6 +13,15 @@
     info: (msg, ctx) => console.log(`[TeleDown] ${ctx ? `[${ctx}] ` : ""}${msg}`),
     error: (msg, ctx) => console.error(`[TeleDown] ${ctx ? `[${ctx}] ` : ""}${msg}`)
   };
+  var activeDownloads = /* @__PURE__ */ new Set();
+  function resolveVideoUrl(url) {
+    if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("blob:")) {
+      return url;
+    }
+    const origin = window.location.origin;
+    const prefix = url.startsWith("/") ? "" : "/";
+    return `${origin}${prefix}${url}`;
+  }
   function extractFileName(url, videoId, extension) {
     try {
       if (url.includes("stream/")) {
@@ -135,10 +144,13 @@
         const batchResults = await Promise.all(batch);
         results.push(...batchResults);
         offset += batchSize;
+        if (offset < fetchers.length) {
+          await new Promise((r) => setTimeout(r, 300));
+        }
       } catch (err) {
         if (err instanceof FetchRetryError) {
           offset = err.segmentIndex;
-          await new Promise((r) => setTimeout(r, 1e3));
+          await new Promise((r) => setTimeout(r, 2e3));
         } else {
           throw err;
         }
@@ -155,7 +167,7 @@
       fileName
     );
     const fetchers = createSegmentFetchers(url, info, videoId, page, downloadId);
-    const batchSize = currentSettings.parallelChunks || 20;
+    const batchSize = currentSettings.parallelChunks || 4;
     const segments = await executeBatched(fetchers, batchSize);
     const finalBlob = new Blob(segments, { type: info.contentType });
     dispatchProgress(videoId, 100, page, downloadId);
@@ -181,11 +193,17 @@
   async function handleSingleDownload(src) {
     const { video_url, video_id, page, download_id } = src;
     if (!video_url) return;
+    if (activeDownloads.has(video_id)) {
+      logger.info(`Skipping duplicate download: ${video_id}`);
+      return;
+    }
+    activeDownloads.add(video_id);
+    const resolvedUrl = resolveVideoUrl(video_url);
     try {
-      if (video_url.startsWith("blob:")) {
-        await downloadBlobUrl(video_url, video_id, page, download_id);
+      if (resolvedUrl.startsWith("blob:")) {
+        await downloadBlobUrl(resolvedUrl, video_id, page, download_id);
       } else {
-        await downloadSegmented(video_url, video_id, page, download_id);
+        await downloadSegmented(resolvedUrl, video_id, page, download_id);
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -195,6 +213,8 @@
           detail: { video_id, error: msg, download_id }
         })
       );
+    } finally {
+      activeDownloads.delete(video_id);
     }
   }
   document.addEventListener("video_download", ((event) => {

@@ -22,7 +22,7 @@ interface InjectSettings {
 
 let currentSettings: InjectSettings = {
   downloadFolder: 'TeleDown',
-  parallelChunks: 20,
+  parallelChunks: 4,
 };
 
 document.addEventListener('tele_down_settings', ((e: CustomEvent<InjectSettings>) => {
@@ -63,6 +63,31 @@ const logger = {
   error: (msg: string | Error, ctx?: string) =>
     console.error(`[TeleDown] ${ctx ? `[${ctx}] ` : ''}${msg}`),
 };
+
+// ============================================================
+// Active download tracking (prevent duplicates)
+// ============================================================
+
+const activeDownloads = new Set<string>();
+
+// ============================================================
+// URL Resolution
+// ============================================================
+
+/**
+ * Resolve a relative Telegram stream/progressive URL to absolute.
+ * Telegram Web uses relative URLs like "k/stream/{encoded}" which
+ * are intercepted by its Service Worker. We need absolute URLs.
+ */
+function resolveVideoUrl(url: string): string {
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('blob:')) {
+    return url;
+  }
+  // Relative URL: prepend the origin
+  const origin = window.location.origin;
+  const prefix = url.startsWith('/') ? '' : '/';
+  return `${origin}${prefix}${url}`;
+}
 
 // ============================================================
 // File Name & Folder
@@ -252,10 +277,15 @@ async function executeBatched(
       const batchResults = await Promise.all(batch);
       results.push(...batchResults);
       offset += batchSize;
+
+      // Delay between batches to avoid overwhelming Telegram's Service Worker
+      if (offset < fetchers.length) {
+        await new Promise((r) => setTimeout(r, 300));
+      }
     } catch (err) {
       if (err instanceof FetchRetryError) {
         offset = err.segmentIndex;
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 2000));
       } else {
         throw err;
       }
@@ -281,7 +311,7 @@ async function downloadSegmented(
   );
 
   const fetchers = createSegmentFetchers(url, info, videoId, page, downloadId);
-  const batchSize = currentSettings.parallelChunks || 20;
+  const batchSize = currentSettings.parallelChunks || 4;
   const segments = await executeBatched(fetchers, batchSize);
 
   const finalBlob = new Blob(segments, { type: info.contentType });
@@ -324,11 +354,21 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
   const { video_url, video_id, page, download_id } = src;
   if (!video_url) return;
 
+  // Prevent duplicate downloads for the same video
+  if (activeDownloads.has(video_id)) {
+    logger.info(`Skipping duplicate download: ${video_id}`);
+    return;
+  }
+  activeDownloads.add(video_id);
+
+  // Resolve relative URLs to absolute
+  const resolvedUrl = resolveVideoUrl(video_url);
+
   try {
-    if (video_url.startsWith('blob:')) {
-      await downloadBlobUrl(video_url, video_id, page, download_id);
+    if (resolvedUrl.startsWith('blob:')) {
+      await downloadBlobUrl(resolvedUrl, video_id, page, download_id);
     } else {
-      await downloadSegmented(video_url, video_id, page, download_id);
+      await downloadSegmented(resolvedUrl, video_id, page, download_id);
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -338,6 +378,8 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
         detail: { video_id, error: msg, download_id },
       }),
     );
+  } finally {
+    activeDownloads.delete(video_id);
   }
 }
 

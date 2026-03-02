@@ -11,7 +11,7 @@
  * 7. Chat navigation detection (URL change)
  */
 
-import { startWatching, type DetectedVideo } from './detector';
+import { startWatching, clearSeenVideos, type DetectedVideo } from './detector';
 import {
   injectDownloadButtons,
   setDownloadHandler,
@@ -110,7 +110,9 @@ function computePanelState(): PanelState {
 
 function requestDownload(videoUrl: string, videoId: string): void {
   const item = videoQueue.get(videoId);
-  if (!item || item.status === 'downloading' || item.status === 'completed') return;
+  if (!item) return;
+  // Only allow downloading from 'pending' or 'error' (retry) status
+  if (item.status === 'downloading' || item.status === 'completed') return;
 
   const downloadId = generateDownloadId();
   item.status = 'downloading';
@@ -270,13 +272,16 @@ function onVideosDetected(videos: DetectedVideo[]): void {
   // Show / update panel
   showControlPanel(computePanelState());
 
-  // Auto-download newly detected videos
+  // Auto-download newly detected videos (stagger to avoid overwhelming SW)
   if (settings.autoDownload && newlyAdded > 0) {
     const newVideos = videos.filter((v) => {
       const item = videoQueue.get(v.videoId);
       return item?.status === 'pending';
     });
-    newVideos.forEach((v) => requestDownload(v.videoUrl, v.videoId));
+    // Stagger auto-downloads with delay between each
+    newVideos.forEach((v, i) => {
+      setTimeout(() => requestDownload(v.videoUrl, v.videoId), i * 1000);
+    });
   }
 }
 
@@ -290,8 +295,9 @@ function handleChatChange(newUrl: string): void {
 
   console.log(`[TeleDown] Chat changed: ${newUrl}`);
 
-  // Clear queue for the new chat
+  // Clear queue and detector's seen IDs for the new chat
   videoQueue.clear();
+  clearSeenVideos();
 
   // Reset panel
   showControlPanel(computePanelState());

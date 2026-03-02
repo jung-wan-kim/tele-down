@@ -425,13 +425,15 @@ function findBestContainer(video: HTMLVideoElement, platform: TelegramPlatform):
 // Main Scanner
 // ============================================================
 
+/** Clear seen video IDs (call on chat change to allow re-detection) */
+export function clearSeenVideos(): void {
+  seenVideoIds.clear();
+}
+
 /** Scan the current page for all video elements */
 export function scanForVideos(): DetectedVideo[] {
   const platform = detectPlatform();
   const allDetected: DetectedVideo[] = [];
-
-  // Reset seen IDs for fresh scan
-  seenVideoIds.clear();
 
   // 1. Chat message videos (primary use case)
   const chatVideos = scanChatVideos(platform);

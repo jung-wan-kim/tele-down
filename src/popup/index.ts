@@ -228,7 +228,7 @@ async function loadSettings(): Promise<void> {
 function readFormValues(): void {
   currentSettings.autoDownload = autoDownloadInput.checked;
   currentSettings.downloadFolder = downloadFolderInput.value.trim() || 'TeleDown';
-  currentSettings.parallelChunks = parseInt(parallelChunksInput.value, 10) || 20;
+  currentSettings.parallelChunks = parseInt(parallelChunksInput.value, 10) || 4;
   currentSettings.parallelDownloads = parseInt(parallelDownloadsInput.value, 10) || 3;
   currentSettings.autoRetry = autoRetryInput.checked;
   currentSettings.maxRetries = parseInt(maxRetriesInput.value, 10) || 3;

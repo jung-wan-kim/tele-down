@@ -46,7 +46,7 @@ export interface ExtensionSettings {
 
 /** Default settings */
 export const DEFAULT_SETTINGS: ExtensionSettings = {
-  parallelChunks: 20,
+  parallelChunks: 4,
   parallelDownloads: 3,
   autoRetry: true,
   maxRetries: 3,
