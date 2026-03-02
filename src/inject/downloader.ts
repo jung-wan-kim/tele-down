@@ -305,19 +305,21 @@ async function downloadSegmented(
 
 function triggerDownload(blob: Blob, fileName: string): void {
   const blobUrl = URL.createObjectURL(blob);
+  const folder = currentSettings.downloadFolder || 'TeleDown';
 
-  document.dispatchEvent(
-    new CustomEvent('tele_down_save', {
-      detail: {
-        blobUrl,
-        fileName,
-        folder: currentSettings.downloadFolder || 'TeleDown',
-      },
-    }),
-  );
+  // Use window.postMessage (NOT CustomEvent) for page → content script communication
+  // CustomEvent.detail may be null across Chrome's world isolation boundary
+  window.postMessage({
+    type: 'tele_down_save',
+    blobUrl,
+    fileName,
+    folder,
+  }, '*');
 
-  logger.info(`Download dispatched: ${currentSettings.downloadFolder}/${fileName} (${formatBytes(blob.size)})`);
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  logger.info(`Download dispatched: ${folder}/${fileName} (${formatBytes(blob.size)})`);
+
+  // Keep blob URL alive for 2 minutes to give chrome.downloads time
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 120000);
 }
 
 // ============================================================

@@ -175,17 +175,15 @@
   }
   function triggerDownload(blob, fileName) {
     const blobUrl = URL.createObjectURL(blob);
-    document.dispatchEvent(
-      new CustomEvent("tele_down_save", {
-        detail: {
-          blobUrl,
-          fileName,
-          folder: currentSettings.downloadFolder || "TeleDown"
-        }
-      })
-    );
-    logger.info(`Download dispatched: ${currentSettings.downloadFolder}/${fileName} (${formatBytes(blob.size)})`);
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 6e4);
+    const folder = currentSettings.downloadFolder || "TeleDown";
+    window.postMessage({
+      type: "tele_down_save",
+      blobUrl,
+      fileName,
+      folder
+    }, "*");
+    logger.info(`Download dispatched: ${folder}/${fileName} (${formatBytes(blob.size)})`);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 12e4);
   }
   function formatBytes(bytes) {
     if (!bytes) return "0 B";

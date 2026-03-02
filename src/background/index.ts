@@ -118,16 +118,22 @@ async function handleMessage(
 
       case 'saveToDisk': {
         const { blobUrl, fileName, folder } = message.data;
+        if (!blobUrl) {
+          sendResponse({ success: false, error: 'No blob URL' });
+          break;
+        }
         const filePath = folder ? `${folder}/${fileName}` : fileName;
+        console.log(`[TeleDown BG] Saving to: ${filePath}, url: ${blobUrl.substring(0, 50)}...`);
         try {
           const downloadId = await chrome.downloads.download({
             url: blobUrl,
             filename: filePath,
             conflictAction: 'uniquify',
           });
+          console.log(`[TeleDown BG] Download started: id=${downloadId}`);
           sendResponse({ success: true, downloadId });
         } catch (err) {
-          console.error('[TeleDown BG] Download failed:', err);
+          console.error('[TeleDown BG] chrome.downloads.download failed:', err);
           sendResponse({ success: false, error: String(err) });
         }
         break;

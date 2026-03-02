@@ -398,17 +398,42 @@ function onAutoDownloadToggle(enabled: boolean): void {
 
 // ============================================================
 // File save handler (inject script → content → background)
+// Uses window.postMessage (not CustomEvent) to cross Chrome's world boundary
 // ============================================================
 
-document.addEventListener('tele_down_save', ((event: CustomEvent) => {
-  const { blobUrl, fileName, folder } = event.detail;
+window.addEventListener('message', (event) => {
+  if (event.source !== window || event.data?.type !== 'tele_down_save') return;
+
+  const { blobUrl, fileName, folder } = event.data;
+  if (!blobUrl || !fileName) return;
+
+  console.log(`[TeleDown] Saving: ${folder}/${fileName}`);
+
   chrome.runtime.sendMessage({
     action: 'saveToDisk',
     data: { blobUrl, fileName, folder },
+  }).then((response) => {
+    if (!response?.success) {
+      console.warn('[TeleDown] chrome.downloads failed, using fallback <a> download');
+      // Fallback: use <a> tag download (no folder, but at least the file saves)
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
   }).catch((err) => {
-    console.error('[TeleDown] saveToDisk failed:', err);
+    console.error('[TeleDown] saveToDisk error:', err);
+    // Fallback
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   });
-}) as EventListener);
+});
 
 // ============================================================
 // Background message listener (settings updates from popup)
