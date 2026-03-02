@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tele Down</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <img src="/public/icons/48.png" alt="Tele Down" class="logo" width="28" height="28">
+        <h1 class="title">Tele Down</h1>
+      </div>
+      <span class="version">v1.0.0</span>
+    </header>
+
+    <!-- Status Bar -->
+    <div class="status-bar" id="statusBar">
+      <span class="status-dot"></span>
+      <span class="status-text">Open Telegram Web to start</span>
+    </div>
+
+    <!-- Downloads Section -->
+    <section class="section">
+      <div class="section-header">
+        <h2>Downloads</h2>
+        <span class="badge" id="downloadCount">0</span>
+      </div>
+      <div id="downloadList" class="download-list">
+        <div class="empty-state" id="emptyState">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+          </svg>
+          <p>No active downloads</p>
+          <p class="hint">Videos will appear here when you start downloading from Telegram Web</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings Section -->
+    <section class="section">
+      <div class="section-header">
+        <h2>Settings</h2>
+      </div>
+      <div class="settings-form">
+        <div class="setting-item">
+          <label for="parallelChunks">Parallel Chunks</label>
+          <input type="number" id="parallelChunks" min="1" max="50" value="20">
+        </div>
+        <div class="setting-item">
+          <label for="parallelDownloads">Parallel Downloads</label>
+          <input type="number" id="parallelDownloads" min="1" max="10" value="3">
+        </div>
+        <div class="setting-item">
+          <label for="autoRetry">Auto Retry</label>
+          <input type="checkbox" id="autoRetry" checked>
+        </div>
+        <div class="setting-item">
+          <label for="maxRetries">Max Retries</label>
+          <input type="number" id="maxRetries" min="0" max="10" value="3">
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <p>Open <a href="https://web.telegram.org" target="_blank" rel="noopener">web.telegram.org</a> to use this extension</p>
+    </footer>
+  </div>
+  <script type="module" src="./index.ts"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "name": {
+    "message": "Tele Down - Telegram Video Downloader",
+    "description": "Extension name"
+  },
+  "desc": {
+    "message": "Download videos from Telegram private channels and groups with one click.",
+    "description": "Extension description"
+  }
+}
