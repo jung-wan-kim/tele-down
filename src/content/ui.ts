@@ -219,6 +219,55 @@ const STYLES = `
   transform: none;
 }
 .tdp-btn-start svg { width: 14px; height: 14px; fill: currentColor; }
+
+/* Scanning state */
+.tdp-btn-start.scanning {
+  background: #353550;
+  color: #4fc3f7;
+  cursor: default;
+}
+.tdp-btn-stop {
+  width: 100%;
+  padding: 7px 0;
+  margin-top: 6px;
+  background: transparent;
+  border: 1px solid rgba(239, 83, 80, 0.4);
+  border-radius: 8px;
+  color: #ef5350;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.tdp-btn-stop:hover { background: rgba(239, 83, 80, 0.1); }
+
+@keyframes tdp-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.tdp-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(79,195,247,0.3);
+  border-top-color: #4fc3f7;
+  border-radius: 50%;
+  animation: tdp-spin 0.8s linear infinite;
+}
+
+.tdp-scan-bar {
+  height: 3px;
+  background: #353550;
+  border-radius: 2px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.tdp-scan-bar-fill {
+  height: 100%;
+  background: #4fc3f7;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
 `;
 
 let styleInjected = false;
@@ -353,21 +402,27 @@ export interface PanelState {
   errored: number;
   autoDownload: boolean;
   downloadFolder: string;
+  scanning?: boolean;
+  scanProgress?: number; // 0-100
 }
 
 type StartDownloadCallback = () => void;
 type AutoDownloadToggleCallback = (enabled: boolean) => void;
+type StopScanCallback = () => void;
 
 let panel: HTMLElement | null = null;
 let onStartDownload: StartDownloadCallback | null = null;
 let onAutoDownloadToggle: AutoDownloadToggleCallback | null = null;
+let onStopScan: StopScanCallback | null = null;
 
 export function setControlPanelCallbacks(
   onStart: StartDownloadCallback,
   onToggle: AutoDownloadToggleCallback,
+  onStop?: StopScanCallback,
 ): void {
   onStartDownload = onStart;
   onAutoDownloadToggle = onToggle;
+  onStopScan = onStop ?? null;
 }
 
 export function showControlPanel(state: PanelState): void {
@@ -380,7 +435,21 @@ export function showControlPanel(state: PanelState): void {
   }
 
   const pendingCount = state.pending;
-  const startDisabled = pendingCount === 0 && state.downloading === 0;
+  const isScanning = state.scanning ?? false;
+  const scanPct = state.scanProgress ?? 0;
+  const startDisabled = !isScanning && pendingCount === 0 && state.downloading === 0;
+
+  // Button text logic
+  let btnHtml: string;
+  if (isScanning) {
+    btnHtml = `<span class="tdp-spinner"></span> 스캔 중... (${state.totalDetected}개 감지)`;
+  } else if (pendingCount > 0) {
+    btnHtml = `<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg> 스캔 + 다운로드 (${pendingCount}개)`;
+  } else if (state.downloading > 0) {
+    btnHtml = '다운로드 중...';
+  } else {
+    btnHtml = `<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg> 스캔 + 다운로드`;
+  }
 
   panel.innerHTML = `
     <div class="tdp-header">
@@ -392,6 +461,7 @@ export function showControlPanel(state: PanelState): void {
         <span class="tdp-stat-label">감지된 동영상</span>
         <span class="tdp-stat-value highlight">${state.totalDetected}개</span>
       </div>
+      ${isScanning ? `<div class="tdp-scan-bar"><div class="tdp-scan-bar-fill" style="width:${scanPct}%"></div></div>` : ''}
       <div class="tdp-progress-row">
         <span>대기 <b>${state.pending}</b></span>
         <span class="cnt-downloading">다운로드 중 <b>${state.downloading}</b></span>
@@ -411,10 +481,10 @@ export function showControlPanel(state: PanelState): void {
         </svg>
         <span>Downloads/<b>${state.downloadFolder}</b>/</span>
       </div>
-      <button class="tdp-btn-start" id="tdp-start-btn" ${startDisabled ? 'disabled' : ''}>
-        <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-        ${pendingCount > 0 ? `전체 다운로드 (${pendingCount}개)` : (state.downloading > 0 ? '다운로드 중...' : '다운로드 완료')}
+      <button class="tdp-btn-start ${isScanning ? 'scanning' : ''}" id="tdp-start-btn" ${startDisabled || isScanning ? 'disabled' : ''}>
+        ${btnHtml}
       </button>
+      ${isScanning ? '<button class="tdp-btn-stop" id="tdp-stop-btn">스캔 중지</button>' : ''}
     </div>
   `;
 
@@ -426,7 +496,11 @@ export function showControlPanel(state: PanelState): void {
   });
 
   panel.querySelector('#tdp-start-btn')?.addEventListener('click', () => {
-    if (!startDisabled) onStartDownload?.();
+    if (!startDisabled && !isScanning) onStartDownload?.();
+  });
+
+  panel.querySelector('#tdp-stop-btn')?.addEventListener('click', () => {
+    onStopScan?.();
   });
 
   panel.querySelector('#tdp-auto-toggle')?.addEventListener('change', (e) => {

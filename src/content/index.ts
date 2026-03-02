@@ -11,7 +11,7 @@
  * 7. Chat navigation detection (URL change)
  */
 
-import { startWatching, clearSeenVideos, tryGetVideoUrl, triggerVideoLoad, type DetectedVideo } from './detector';
+import { startWatching, clearSeenVideos, tryGetVideoUrl, triggerVideoLoad, scanForVideos, type DetectedVideo } from './detector';
 import {
   injectDownloadButtons,
   setDownloadHandler,
@@ -47,6 +47,9 @@ const videoQueue = new Map<string, QueueItem>();
 let settings: ExtensionSettings = { ...DEFAULT_SETTINGS };
 let downloadCounter = 0;
 let currentChatUrl = '';
+let isScanning = false;
+let scanProgress = 0;
+let scanAborted = false;
 
 // ============================================================
 // Settings
@@ -107,6 +110,8 @@ function computePanelState(): PanelState {
     errored,
     autoDownload: settings.autoDownload,
     downloadFolder: settings.downloadFolder,
+    scanning: isScanning,
+    scanProgress,
   };
 }
 
@@ -252,6 +257,150 @@ async function startAllPendingDownloads(): Promise<void> {
 }
 
 // ============================================================
+// Auto-Scroll Scan + Download
+// ============================================================
+
+/**
+ * Find the scrollable container for the chat messages.
+ * Web K: .bubbles (has overflow-y scroll)
+ * Web A: .MessageList or .messages-container
+ */
+function getScrollContainer(): HTMLElement | null {
+  // Web K: .bubbles is the scrollable parent of .bubbles-inner
+  const bubblesEl = document.querySelector<HTMLElement>('.bubbles');
+  if (bubblesEl) return bubblesEl;
+
+  // Web A
+  return (
+    document.querySelector<HTMLElement>('.MessageList') ||
+    document.querySelector<HTMLElement>('.messages-container')
+  );
+}
+
+/**
+ * Auto-scroll through the entire chat, detect all videos, then download.
+ *
+ * Strategy:
+ * 1. Scroll to the top of the current loaded messages
+ * 2. Scroll down step-by-step (70% viewport per step)
+ * 3. At each step, scan for video containers
+ * 4. After reaching the bottom, resolve URLs and start downloads
+ */
+async function autoScrollAndDownload(): Promise<void> {
+  if (isScanning) return;
+
+  const scrollContainer = getScrollContainer();
+  if (!scrollContainer) {
+    console.warn('[TeleDown] Cannot find scroll container');
+    startAllPendingDownloads();
+    return;
+  }
+
+  isScanning = true;
+  scanAborted = false;
+  scanProgress = 0;
+  updateControlPanel(computePanelState());
+
+  console.log('[TeleDown] Auto-scroll scan started');
+
+  // Save original scroll position to restore later if needed
+  const originalScrollTop = scrollContainer.scrollTop;
+
+  try {
+    // Step 1: Scroll to top
+    scrollContainer.scrollTop = 0;
+    await sleep(800);
+
+    if (scanAborted) return;
+
+    // Step 2: Scan at top position
+    processScannedVideos();
+
+    // Step 3: Scroll down step-by-step
+    const viewportHeight = scrollContainer.clientHeight;
+    const scrollStep = Math.max(viewportHeight * 0.7, 200);
+
+    let lastScrollHeight = scrollContainer.scrollHeight;
+    let stuckCount = 0;
+
+    while (!scanAborted) {
+      const maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
+      const currentScroll = scrollContainer.scrollTop;
+
+      // Update progress
+      scanProgress = maxScroll > 0 ? Math.min(99, (currentScroll / maxScroll) * 100) : 99;
+      updateControlPanel(computePanelState());
+
+      // Check if we've reached the bottom
+      if (currentScroll >= maxScroll - 5) {
+        // Double-check: wait a bit and see if more content loaded
+        await sleep(500);
+        const newMaxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
+        if (scrollContainer.scrollTop >= newMaxScroll - 5) break;
+      }
+
+      // Scroll down one step
+      scrollContainer.scrollTop = Math.min(currentScroll + scrollStep, maxScroll);
+      await sleep(600);
+
+      if (scanAborted) break;
+
+      // Scan for videos at current position
+      processScannedVideos();
+
+      // Detect if we're stuck (no new content loading, no scroll change)
+      if (scrollContainer.scrollHeight === lastScrollHeight &&
+          Math.abs(scrollContainer.scrollTop - currentScroll) < 5) {
+        stuckCount++;
+        if (stuckCount >= 3) break;
+      } else {
+        stuckCount = 0;
+      }
+      lastScrollHeight = scrollContainer.scrollHeight;
+    }
+
+    // Final scan at bottom
+    if (!scanAborted) {
+      processScannedVideos();
+    }
+
+    scanProgress = 100;
+    updateControlPanel(computePanelState());
+
+    console.log(`[TeleDown] Scan complete: ${videoQueue.size} video(s) found`);
+  } finally {
+    isScanning = false;
+    scanProgress = 0;
+    updateControlPanel(computePanelState());
+
+    // Scroll back to bottom (natural position for chat)
+    scrollContainer.scrollTop = scrollContainer.scrollHeight;
+  }
+
+  // Start downloading all pending videos
+  if (!scanAborted) {
+    broadcastSettings();
+    await startAllPendingDownloads();
+  }
+}
+
+/** Process videos found by scanForVideos and add to queue */
+function processScannedVideos(): void {
+  const videos = scanForVideos();
+  if (videos.length > 0) {
+    onVideosDetected(videos);
+  }
+}
+
+function stopScanning(): void {
+  scanAborted = true;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// ============================================================
 // Injected Script Loader
 // ============================================================
 
@@ -381,7 +530,7 @@ function setupUrlWatcher(): void {
 
 function onStartDownloadClick(): void {
   broadcastSettings(); // Ensure injected script has latest settings
-  startAllPendingDownloads();
+  autoScrollAndDownload();
 }
 
 function onAutoDownloadToggle(enabled: boolean): void {
@@ -463,7 +612,7 @@ async function init(): Promise<void> {
   setDownloadHandler(requestDownload);
 
   // Setup panel callbacks
-  setControlPanelCallbacks(onStartDownloadClick, onAutoDownloadToggle);
+  setControlPanelCallbacks(onStartDownloadClick, onAutoDownloadToggle, stopScanning);
 
   // Watch for URL changes (chat navigation)
   setupUrlWatcher();
