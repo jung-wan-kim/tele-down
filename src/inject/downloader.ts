@@ -18,11 +18,13 @@
 interface InjectSettings {
   downloadFolder: string;
   parallelChunks: number;
+  downloadQueue: number;
 }
 
 let currentSettings: InjectSettings = {
   downloadFolder: 'TeleDown',
   parallelChunks: 10,
+  downloadQueue: 500,
 };
 
 // Use window.postMessage (NOT CustomEvent) — CustomEvent.detail is null across Chrome world boundary
@@ -31,6 +33,7 @@ window.addEventListener('message', (e: MessageEvent) => {
   const { downloadFolder, parallelChunks } = e.data;
   if (downloadFolder !== undefined) currentSettings.downloadFolder = downloadFolder;
   if (parallelChunks !== undefined) currentSettings.parallelChunks = parallelChunks;
+  if (e.data.downloadQueue !== undefined) currentSettings.downloadQueue = e.data.downloadQueue;
   console.log('[TeleDown] Settings updated:', currentSettings);
 });
 
@@ -223,9 +226,22 @@ async function downloadBlobUrl(
 // Telegram's MTProto API requires Range sizes to be valid "limits":
 //   - Must be a multiple of 4096 (4KB)
 //   - Maximum 1MB (1048576)
-// Using the server's preferred segment size (from probe) guarantees validity.
-// `parallelChunks` controls how many segments download SIMULTANEOUSLY.
+//
+// `downloadQueue`  → target number of segments (queue size, e.g. 500)
+// `parallelChunks` → how many segments download SIMULTANEOUSLY (e.g. 10)
 // ============================================================
+
+const CHUNK_ALIGN = 4096; // MTProto minimum alignment
+const MAX_CHUNK = 1048576; // MTProto maximum (1MB)
+
+/** Calculate MTProto-compatible chunk size for target segment count */
+function alignChunkSize(totalSize: number, targetSegments: number): number {
+  let size = Math.floor(totalSize / Math.max(1, targetSegments));
+  // Align down to 4096 boundary
+  size = Math.floor(size / CHUNK_ALIGN) * CHUNK_ALIGN;
+  // Clamp: min 4KB, max 1MB
+  return Math.max(CHUNK_ALIGN, Math.min(size, MAX_CHUNK));
+}
 
 async function downloadSegmented(
   url: string,
@@ -233,19 +249,21 @@ async function downloadSegmented(
   page?: string,
   downloadId?: string,
 ): Promise<void> {
-  // Probe: let the server tell us its preferred segment size
-  const probeResp = await fetchWithRetry(url, { headers: { Range: 'bytes=0-' } }, 'Probe');
+  // Probe: request 1 byte to learn total file size + content type
+  const probeResp = await fetchWithRetry(url, { headers: { Range: 'bytes=0-0' } }, 'Probe');
 
   const contentSize = parseInt(probeResp.headers.get('Content-Range')?.split('/')[1] || '0', 10);
-  const segmentSize = parseInt(probeResp.headers.get('Content-Length') || '0', 10);
   const contentType = probeResp.headers.get('Content-Type') || 'application/octet-stream';
 
-  if (!contentSize || !segmentSize) throw new Error('Cannot determine content size');
+  if (!contentSize) throw new Error('Cannot determine content size');
+
+  const targetQueue = Math.max(1, currentSettings.downloadQueue || 500);
+  const segmentSize = alignChunkSize(contentSize, targetQueue);
+  const numSegments = Math.ceil(contentSize / segmentSize);
+  const maxConcurrent = Math.max(1, currentSettings.parallelChunks || 10);
 
   const ext = contentType.split('/')[1] || 'mp4';
   const fileName = extractFileName(url, videoId, ext);
-  const numSegments = Math.ceil(contentSize / segmentSize);
-  const maxConcurrent = Math.max(1, currentSettings.parallelChunks || 10);
 
   logger.info(
     `Download: ${numSegments} segs queued, ${formatBytes(contentSize)}, segSize=${formatBytes(segmentSize)}, concurrent=${maxConcurrent}`,

@@ -3,13 +3,15 @@
   // src/inject/downloader.ts
   var currentSettings = {
     downloadFolder: "TeleDown",
-    parallelChunks: 10
+    parallelChunks: 10,
+    downloadQueue: 500
   };
   window.addEventListener("message", (e) => {
     if (e.source !== window || e.data?.type !== "tele_down_settings") return;
     const { downloadFolder, parallelChunks } = e.data;
     if (downloadFolder !== void 0) currentSettings.downloadFolder = downloadFolder;
     if (parallelChunks !== void 0) currentSettings.parallelChunks = parallelChunks;
+    if (e.data.downloadQueue !== void 0) currentSettings.downloadQueue = e.data.downloadQueue;
     console.log("[TeleDown] Settings updated:", currentSettings);
   });
   var logger = {
@@ -120,16 +122,24 @@
     const finalBlob = new Blob(blobs, { type: "video/mp4" });
     triggerDownload(finalBlob, baseName);
   }
+  var CHUNK_ALIGN = 4096;
+  var MAX_CHUNK = 1048576;
+  function alignChunkSize(totalSize, targetSegments) {
+    let size = Math.floor(totalSize / Math.max(1, targetSegments));
+    size = Math.floor(size / CHUNK_ALIGN) * CHUNK_ALIGN;
+    return Math.max(CHUNK_ALIGN, Math.min(size, MAX_CHUNK));
+  }
   async function downloadSegmented(url, videoId, page, downloadId) {
-    const probeResp = await fetchWithRetry(url, { headers: { Range: "bytes=0-" } }, "Probe");
+    const probeResp = await fetchWithRetry(url, { headers: { Range: "bytes=0-0" } }, "Probe");
     const contentSize = parseInt(probeResp.headers.get("Content-Range")?.split("/")[1] || "0", 10);
-    const segmentSize = parseInt(probeResp.headers.get("Content-Length") || "0", 10);
     const contentType = probeResp.headers.get("Content-Type") || "application/octet-stream";
-    if (!contentSize || !segmentSize) throw new Error("Cannot determine content size");
-    const ext = contentType.split("/")[1] || "mp4";
-    const fileName = extractFileName(url, videoId, ext);
+    if (!contentSize) throw new Error("Cannot determine content size");
+    const targetQueue = Math.max(1, currentSettings.downloadQueue || 500);
+    const segmentSize = alignChunkSize(contentSize, targetQueue);
     const numSegments = Math.ceil(contentSize / segmentSize);
     const maxConcurrent = Math.max(1, currentSettings.parallelChunks || 10);
+    const ext = contentType.split("/")[1] || "mp4";
+    const fileName = extractFileName(url, videoId, ext);
     logger.info(
       `Download: ${numSegments} segs queued, ${formatBytes(contentSize)}, segSize=${formatBytes(segmentSize)}, concurrent=${maxConcurrent}`,
       fileName

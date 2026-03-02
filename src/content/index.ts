@@ -82,6 +82,7 @@ function broadcastSettings(): void {
     type: 'tele_down_settings',
     downloadFolder: settings.downloadFolder,
     parallelChunks: settings.parallelChunks,
+    downloadQueue: settings.downloadQueue,
   }, '*');
 }
 
