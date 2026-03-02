@@ -53,8 +53,15 @@ const STYLES = `
 .tele-down-btn.completed { background: rgba(76, 175, 80, 0.85); }
 .tele-down-btn.error { background: rgba(244, 67, 54, 0.85); }
 
+/* Ensure relative positioning for download button placement */
 .bubble .media-container,
-.Message .media-inner { position: relative; }
+.bubble .document-container,
+.Message .media-inner,
+.media-viewer-aspecter,
+.MediaViewerSlide--active,
+.media-viewer-whole,
+#stories-viewer,
+#StoryViewer { position: relative; }
 
 /* === Floating control panel === */
 #tele-down-panel {
@@ -269,6 +276,8 @@ export function injectDownloadButton(video: DetectedVideo): void {
   const mediaContainer =
     containerElement.querySelector<HTMLElement>('.media-container') ||
     containerElement.querySelector<HTMLElement>('.media-inner') ||
+    containerElement.querySelector<HTMLElement>('.document-container') ||
+    containerElement.querySelector<HTMLElement>('.media-viewer-aspecter') ||
     containerElement;
 
   if (window.getComputedStyle(mediaContainer).position === 'static') {
