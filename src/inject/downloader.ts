@@ -76,17 +76,24 @@ const activeDownloads = new Set<string>();
 
 /**
  * Resolve a relative Telegram stream/progressive URL to absolute.
- * Telegram Web uses relative URLs like "k/stream/{encoded}" which
- * are intercepted by its Service Worker. We need absolute URLs.
+ * Telegram Web uses relative URLs like "stream/{encoded}" which
+ * are intercepted by its Service Worker under /k/ or /a/ path.
+ * Using new URL() properly resolves relative to current page base.
  */
 function resolveVideoUrl(url: string): string {
   if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('blob:')) {
     return url;
   }
-  // Relative URL: prepend the origin
-  const origin = window.location.origin;
-  const prefix = url.startsWith('/') ? '' : '/';
-  return `${origin}${prefix}${url}`;
+  try {
+    // new URL resolves relative to current page: e.g.
+    // "stream/..." + "https://web.telegram.org/k/#chat" → "https://web.telegram.org/k/stream/..."
+    return new URL(url, window.location.href).href;
+  } catch {
+    // Fallback: manual concatenation with pathname
+    const base = window.location.origin + window.location.pathname;
+    const prefix = url.startsWith('/') ? '' : '/';
+    return `${base.replace(/\/$/, '')}${prefix}${url}`;
+  }
 }
 
 // ============================================================

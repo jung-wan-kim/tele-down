@@ -18,9 +18,13 @@
     if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("blob:")) {
       return url;
     }
-    const origin = window.location.origin;
-    const prefix = url.startsWith("/") ? "" : "/";
-    return `${origin}${prefix}${url}`;
+    try {
+      return new URL(url, window.location.href).href;
+    } catch {
+      const base = window.location.origin + window.location.pathname;
+      const prefix = url.startsWith("/") ? "" : "/";
+      return `${base.replace(/\/$/, "")}${prefix}${url}`;
+    }
   }
   function extractFileName(url, videoId, extension) {
     try {
