@@ -22,7 +22,7 @@ interface InjectSettings {
 
 let currentSettings: InjectSettings = {
   downloadFolder: 'TeleDown',
-  parallelChunks: 2,
+  parallelChunks: 20,
 };
 
 // Use window.postMessage (NOT CustomEvent) — CustomEvent.detail is null across Chrome world boundary
@@ -218,10 +218,14 @@ async function downloadBlobUrl(
 }
 
 // ============================================================
-// Segmented download (primary) — user-controlled chunk count
+// Segmented download (primary)
+//
+// Telegram's MTProto API requires Range sizes to be valid "limits":
+//   - Must be a multiple of 4096 (4KB)
+//   - Maximum 1MB (1048576)
+// Using the server's preferred segment size (from probe) guarantees validity.
+// `parallelChunks` controls how many segments download SIMULTANEOUSLY.
 // ============================================================
-
-const MIN_CHUNK_SIZE = 64 * 1024; // 64KB minimum per chunk
 
 async function downloadSegmented(
   url: string,
@@ -229,54 +233,55 @@ async function downloadSegmented(
   page?: string,
   downloadId?: string,
 ): Promise<void> {
-  // Probe: minimal range request to get total file size
-  const probeResp = await fetchWithRetry(url, { headers: { Range: 'bytes=0-0' } }, 'Probe');
-  const rangeHeader = probeResp.headers.get('Content-Range') || '';
-  const totalMatch = rangeHeader.match(/\/(\d+)$/);
-  if (!totalMatch) throw new Error('Cannot determine content size from Content-Range');
+  // Probe: let the server tell us its preferred segment size
+  const probeResp = await fetchWithRetry(url, { headers: { Range: 'bytes=0-' } }, 'Probe');
 
-  const contentSize = parseInt(totalMatch[1], 10);
+  const contentSize = parseInt(probeResp.headers.get('Content-Range')?.split('/')[1] || '0', 10);
+  const segmentSize = parseInt(probeResp.headers.get('Content-Length') || '0', 10);
   const contentType = probeResp.headers.get('Content-Type') || 'application/octet-stream';
-  if (!contentSize) throw new Error('Content size is 0');
+
+  if (!contentSize || !segmentSize) throw new Error('Cannot determine content size');
 
   const ext = contentType.split('/')[1] || 'mp4';
   const fileName = extractFileName(url, videoId, ext);
-
-  // User-controlled chunk count (capped by minimum chunk size)
-  const desired = Math.max(1, currentSettings.parallelChunks || 2);
-  const numChunks = Math.min(desired, Math.ceil(contentSize / MIN_CHUNK_SIZE));
-  const chunkSize = Math.ceil(contentSize / numChunks);
+  const numSegments = Math.ceil(contentSize / segmentSize);
+  const maxConcurrent = Math.max(1, currentSettings.parallelChunks || 20);
 
   logger.info(
-    `Download: ${numChunks} chunks (requested ${desired}), ${formatBytes(contentSize)}, chunkSize=${formatBytes(chunkSize)}`,
+    `Download: ${numSegments} segments, ${formatBytes(contentSize)}, segSize=${formatBytes(segmentSize)}, concurrent=${maxConcurrent}`,
     fileName,
   );
 
-  // Create all chunk ranges
-  const chunks: Array<{ start: number; end: number; idx: number }> = [];
-  for (let i = 0; i < numChunks; i++) {
-    const start = i * chunkSize;
-    const end = Math.min(start + chunkSize - 1, contentSize - 1);
-    chunks.push({ start, end, idx: i });
+  // Create all segment ranges
+  const segments: Array<{ start: number; end: number; idx: number }> = [];
+  for (let i = 0; i < numSegments; i++) {
+    const start = i * segmentSize;
+    const end = Math.min(start + segmentSize - 1, contentSize - 1);
+    segments.push({ start, end, idx: i });
   }
 
-  // Fetch ALL chunks in parallel
-  const buffers: ArrayBuffer[] = new Array(numChunks);
-  let completedChunks = 0;
+  // Download with concurrency control
+  const buffers: ArrayBuffer[] = new Array(numSegments);
+  let completedSegments = 0;
 
-  const promises = chunks.map(({ start, end, idx }) =>
-    fetchWithRetry(
-      url,
-      { headers: { Range: `bytes=${start}-${end}` } },
-      `Chunk ${idx + 1}/${numChunks}`,
-    ).then(async (resp) => {
-      buffers[idx] = await resp.arrayBuffer();
-      completedChunks++;
-      dispatchProgress(videoId, (completedChunks / numChunks) * 100, page, downloadId);
-    }),
-  );
+  // Process in batches of maxConcurrent
+  for (let i = 0; i < segments.length; i += maxConcurrent) {
+    const batch = segments.slice(i, i + maxConcurrent);
 
-  await Promise.all(promises);
+    await Promise.all(
+      batch.map(({ start, end, idx }) =>
+        fetchWithRetry(
+          url,
+          { headers: { Range: `bytes=${start}-${end}` } },
+          `Seg ${idx + 1}/${numSegments}`,
+        ).then(async (resp) => {
+          buffers[idx] = await resp.arrayBuffer();
+          completedSegments++;
+          dispatchProgress(videoId, (completedSegments / numSegments) * 100, page, downloadId);
+        }),
+      ),
+    );
+  }
 
   const finalBlob = new Blob(buffers, { type: contentType });
   dispatchProgress(videoId, 100, page, downloadId);
