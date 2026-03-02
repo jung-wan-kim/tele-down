@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -20,13 +20,33 @@
     <!-- Status Bar -->
     <div class="status-bar" id="statusBar">
       <span class="status-dot"></span>
-      <span class="status-text">Open Telegram Web to start</span>
+      <span class="status-text">Telegram Web을 열어주세요</span>
     </div>
+
+    <!-- Quick Settings -->
+    <section class="section">
+      <div class="section-header">
+        <h2>빠른 설정</h2>
+      </div>
+      <div class="settings-form">
+        <div class="setting-item">
+          <label for="autoDownload">자동 다운로드</label>
+          <input type="checkbox" id="autoDownload">
+        </div>
+        <div class="setting-item">
+          <label for="downloadFolder">저장 폴더명</label>
+          <input type="text" id="downloadFolder" placeholder="TeleDown" value="TeleDown" class="text-input">
+        </div>
+        <div class="folder-hint" id="folderHint">
+          📁 저장 위치: Downloads/<span id="folderPreview">TeleDown</span>/
+        </div>
+      </div>
+    </section>
 
     <!-- Downloads Section -->
     <section class="section">
       <div class="section-header">
-        <h2>Downloads</h2>
+        <h2>다운로드</h2>
         <span class="badge" id="downloadCount">0</span>
       </div>
       <div id="downloadList" class="download-list">
@@ -34,40 +54,41 @@
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
           </svg>
-          <p>No active downloads</p>
-          <p class="hint">Videos will appear here when you start downloading from Telegram Web</p>
+          <p>다운로드 없음</p>
+          <p class="hint">Telegram Web 채팅방에서 동영상을 감지하면 여기에 표시됩니다</p>
         </div>
       </div>
     </section>
 
-    <!-- Settings Section -->
-    <section class="section">
-      <div class="section-header">
-        <h2>Settings</h2>
-      </div>
-      <div class="settings-form">
+    <!-- Advanced Settings -->
+    <details class="section collapsible">
+      <summary class="section-header collapsible-header">
+        <h2>고급 설정</h2>
+        <span class="chevron">▸</span>
+      </summary>
+      <div class="settings-form" style="padding-top: 8px;">
         <div class="setting-item">
-          <label for="parallelChunks">Parallel Chunks</label>
+          <label for="parallelChunks">병렬 청크 수</label>
           <input type="number" id="parallelChunks" min="1" max="50" value="20">
         </div>
         <div class="setting-item">
-          <label for="parallelDownloads">Parallel Downloads</label>
+          <label for="parallelDownloads">동시 다운로드 수</label>
           <input type="number" id="parallelDownloads" min="1" max="10" value="3">
         </div>
         <div class="setting-item">
-          <label for="autoRetry">Auto Retry</label>
+          <label for="autoRetry">자동 재시도</label>
           <input type="checkbox" id="autoRetry" checked>
         </div>
         <div class="setting-item">
-          <label for="maxRetries">Max Retries</label>
+          <label for="maxRetries">최대 재시도 횟수</label>
           <input type="number" id="maxRetries" min="0" max="10" value="3">
         </div>
       </div>
-    </section>
+    </details>
 
     <!-- Footer -->
     <footer class="footer">
-      <p>Open <a href="https://web.telegram.org" target="_blank" rel="noopener">web.telegram.org</a> to use this extension</p>
+      <p>채팅방에서 동영상 감지 후 → <b>다운로드 시작</b> 버튼 클릭</p>
     </footer>
   </div>
   <script type="module" src="./index.ts"></script>

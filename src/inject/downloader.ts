@@ -1,10 +1,34 @@
 /**
- * TeleDown - Injected Download Script
+ * TeleDown - Injected Download Script (runs in PAGE context)
  *
- * This script runs in the PAGE context (not the extension context).
- * It is injected via <script> tag by the content script.
- * It handles the actual video download using Range requests.
+ * Injected via <script> tag by the content script.
+ * Has access to page's fetch / cookies (for authenticated Telegram requests).
+ *
+ * Features:
+ * - Range-based parallel chunk download
+ * - Blob URL fallback (sequential)
+ * - Download to configured subfolder (e.g. Downloads/TeleDown/)
+ * - Listens for settings from content script
  */
+
+// ============================================================
+// Settings (received from content script via custom event)
+// ============================================================
+
+interface InjectSettings {
+  downloadFolder: string;  // subfolder inside Downloads
+  parallelChunks: number;
+}
+
+let currentSettings: InjectSettings = {
+  downloadFolder: 'TeleDown',
+  parallelChunks: 20,
+};
+
+document.addEventListener('tele_down_settings', ((e: CustomEvent<InjectSettings>) => {
+  currentSettings = { ...currentSettings, ...e.detail };
+  console.log('[TeleDown] Settings updated:', currentSettings);
+}) as EventListener);
 
 // ============================================================
 // Types
@@ -34,72 +58,61 @@ interface SegmentInfo {
 // ============================================================
 
 const logger = {
-  info: (msg: string, ctx?: string) => {
-    console.log(`[TeleDown] ${ctx ? `[${ctx}] ` : ''}${msg}`);
-  },
-  error: (msg: string | Error, ctx?: string) => {
-    console.error(`[TeleDown] ${ctx ? `[${ctx}] ` : ''}${msg}`);
-  },
+  info: (msg: string, ctx?: string) =>
+    console.log(`[TeleDown] ${ctx ? `[${ctx}] ` : ''}${msg}`),
+  error: (msg: string | Error, ctx?: string) =>
+    console.error(`[TeleDown] ${ctx ? `[${ctx}] ` : ''}${msg}`),
 };
 
 // ============================================================
-// File Name Extraction
+// File Name & Folder
 // ============================================================
 
-/** Extract file name from a Telegram streaming URL */
 function extractFileName(url: string, videoId: string, extension: string): string {
   try {
-    // Pattern: .../stream/{encodedJSON}?...
     if (url.includes('stream/')) {
       const encodedPart = url.substring(url.indexOf('stream/') + 7).split('?')[0];
       const parsed = JSON.parse(decodeURIComponent(encodedPart));
       if (parsed?.fileName) return parsed.fileName;
       if (parsed?.location?.id) return `${parsed.location.id}.${extension}`;
     }
-
-    // Pattern: .../progressive/...document{id}...
     if (url.includes('progressive/')) {
       const docPart = url.split('document').slice(1).join('');
       if (docPart) return `${docPart}.${extension}`;
     }
   } catch {
-    // Fallback to random name
+    // Fallback
   }
-
-  // Use videoId if available, otherwise generate random name
   if (videoId) return `${videoId}.${extension}`;
-  return `${randomString()}.${extension}`;
+  return `${Math.random().toString(36).substring(2, 10)}.${extension}`;
 }
 
-function randomString(len = 8): string {
-  return Math.random().toString(36).substring(2, 2 + len);
+/**
+ * Prefix the file name with the configured download folder.
+ * Setting anchor.download = "TeleDown/video.mp4" makes the browser
+ * create Downloads/TeleDown/ automatically.
+ */
+function withFolder(fileName: string): string {
+  const folder = currentSettings.downloadFolder?.trim();
+  if (!folder) return fileName;
+  return `${folder}/${fileName}`;
 }
 
 // ============================================================
-// Progress Dispatcher
+// Progress
 // ============================================================
 
-function dispatchProgress(
-  videoId: string,
-  progress: number,
-  page?: string,
-  downloadId?: string,
-): void {
+function dispatchProgress(videoId: string, progress: number, page?: string, downloadId?: string): void {
   if (!videoId) return;
-
-  const event = new CustomEvent(`${videoId}_video_download_progress`, {
-    detail: {
-      video_id: videoId,
-      progress: progress.toFixed(0),
-      page,
-      download_id: downloadId,
-    },
-  });
-  document.dispatchEvent(event);
+  document.dispatchEvent(
+    new CustomEvent(`${videoId}_video_download_progress`, {
+      detail: { video_id: videoId, progress: progress.toFixed(0), page, download_id: downloadId },
+    }),
+  );
 }
 
 // ============================================================
-// Blob Download (fallback for blob: URLs)
+// Blob URL (sequential) download — fallback
 // ============================================================
 
 const CONTENT_RANGE_REGEX = /^bytes (\d+)-(\d+)\/(\d+)$/;
@@ -114,7 +127,7 @@ async function downloadBlobUrl(
   let offset = 0;
   let totalSize: number | null = null;
   let extension = 'mp4';
-  let fileName = extractFileName(url, videoId, extension);
+  let baseName = extractFileName(url, videoId, extension);
 
   const fetchNext = async (): Promise<void> => {
     const response = await fetch(url, {
@@ -123,91 +136,60 @@ async function downloadBlobUrl(
     });
 
     if (![200, 206].includes(response.status)) {
-      throw new Error(`Unexpected HTTP status: ${response.status}`);
+      throw new Error(`HTTP ${response.status}`);
     }
 
-    // Update extension from Content-Type
-    const contentType = response.headers.get('Content-Type')?.split(';')[0] || '';
-    const ext = contentType.split('/')[1];
+    const ct = response.headers.get('Content-Type')?.split(';')[0] || '';
+    const ext = ct.split('/')[1];
     if (ext) {
       extension = ext;
-      fileName = fileName.replace(/\.[^.]+$/, `.${ext}`);
+      baseName = baseName.replace(/\.[^.]+$/, `.${ext}`);
     }
 
-    // Parse Content-Range
     const rangeHeader = response.headers.get('Content-Range') || '';
     const match = rangeHeader.match(CONTENT_RANGE_REGEX);
-    if (!match) {
-      throw new Error('Invalid Content-Range header');
-    }
+    if (!match) throw new Error('Invalid Content-Range header');
 
     const rangeStart = parseInt(match[1], 10);
     const rangeEnd = parseInt(match[2], 10);
     const total = parseInt(match[3], 10);
 
-    // Validate continuity
-    if (rangeStart !== offset) {
-      throw new Error(`Gap detected: expected offset ${offset}, got ${rangeStart}`);
-    }
-    if (totalSize !== null && total !== totalSize) {
-      throw new Error('Total size mismatch between responses');
-    }
+    if (rangeStart !== offset) throw new Error(`Gap: expected ${offset}, got ${rangeStart}`);
+    if (totalSize !== null && total !== totalSize) throw new Error('Total size mismatch');
 
     offset = rangeEnd + 1;
     totalSize = total;
 
     const progress = (offset / totalSize) * 100;
-    logger.info(`Progress: ${progress.toFixed(0)}%`, fileName);
     dispatchProgress(videoId, progress, page, downloadId);
 
-    const blob = await response.blob();
-    blobs.push(blob);
+    blobs.push(await response.blob());
 
-    if (offset < totalSize) {
-      await fetchNext();
-    }
+    if (offset < totalSize) await fetchNext();
   };
 
   await fetchNext();
 
-  // Merge blobs and trigger download
-  logger.info('Merging blobs...', fileName);
   const finalBlob = new Blob(blobs, { type: 'video/mp4' });
-  triggerDownload(finalBlob, fileName);
+  triggerDownload(finalBlob, baseName);
 }
 
 // ============================================================
-// Segmented Parallel Download (primary method)
+// Segmented parallel download (primary)
 // ============================================================
 
-/** Probe the server to get segment info */
 async function probeSegmentInfo(url: string): Promise<SegmentInfo> {
-  const response = await fetch(url, {
-    headers: { Range: 'bytes=0-' },
-  });
+  const response = await fetch(url, { headers: { Range: 'bytes=0-' } });
+  if (!response.ok) throw new Error(`Probe failed: HTTP ${response.status}`);
 
-  if (!response.ok) {
-    throw new Error(`HTTP error during probe: ${response.status}`);
-  }
-
-  const contentSize = parseInt(
-    response.headers.get('Content-Range')?.split('/')[1] || '0',
-    10,
-  );
-  const segmentSize = parseInt(
-    response.headers.get('Content-Length') || '0',
-    10,
-  );
+  const contentSize = parseInt(response.headers.get('Content-Range')?.split('/')[1] || '0', 10);
+  const segmentSize = parseInt(response.headers.get('Content-Length') || '0', 10);
   const contentType = response.headers.get('Content-Type') || 'application/octet-stream';
-  const acceptRanges = response.headers.get('Accept-Ranges');
 
-  if (acceptRanges !== 'bytes') {
+  if (response.headers.get('Accept-Ranges') !== 'bytes') {
     throw new Error('Server does not support byte-range requests');
   }
-
-  if (contentSize === 0 || segmentSize === 0) {
-    throw new Error('Unable to determine content/segment size');
-  }
+  if (!contentSize || !segmentSize) throw new Error('Cannot determine content size');
 
   return {
     contentType,
@@ -217,44 +199,6 @@ async function probeSegmentInfo(url: string): Promise<SegmentInfo> {
   };
 }
 
-/** Create fetch functions for each segment */
-function createSegmentFetchers(
-  url: string,
-  segmentInfo: SegmentInfo,
-  videoId: string,
-  page?: string,
-  downloadId?: string,
-): Array<() => Promise<ArrayBuffer>> {
-  const { segmentSize, contentSize } = segmentInfo;
-
-  return Array.from({ length: segmentInfo.segmentCount }, (_, index) => {
-    const start = index * segmentSize;
-    const end = Math.min(start + segmentSize - 1, contentSize - 1);
-
-    return async (): Promise<ArrayBuffer> => {
-      const response = await fetch(url, {
-        headers: { Range: `bytes=${start}-${end}` },
-      });
-
-      if (response.status === 408) {
-        throw new FetchRetryError(`Timeout on segment ${index}`, index, `bytes=${start}-${end}`);
-      }
-
-      if (!response.ok && response.status !== 206) {
-        throw new Error(`Segment ${index} failed: HTTP ${response.status}`);
-      }
-
-      // Dispatch progress based on segment end position
-      const progress = (end / contentSize) * 100;
-      dispatchProgress(videoId, progress, page, downloadId);
-      logger.info(`Segment ${index}/${segmentInfo.segmentCount}: ${progress.toFixed(1)}%`);
-
-      return response.arrayBuffer();
-    };
-  });
-}
-
-/** Custom error for fetch retries */
 class FetchRetryError extends Error {
   constructor(
     message: string,
@@ -266,31 +210,54 @@ class FetchRetryError extends Error {
   }
 }
 
-/** Execute fetchers in parallel batches with retry support */
+function createSegmentFetchers(
+  url: string,
+  info: SegmentInfo,
+  videoId: string,
+  page?: string,
+  downloadId?: string,
+): Array<() => Promise<ArrayBuffer>> {
+  return Array.from({ length: info.segmentCount }, (_, index) => {
+    const start = index * info.segmentSize;
+    const end = Math.min(start + info.segmentSize - 1, info.contentSize - 1);
+
+    return async (): Promise<ArrayBuffer> => {
+      const response = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
+
+      if (response.status === 408) {
+        throw new FetchRetryError(`Timeout on segment ${index}`, index, `bytes=${start}-${end}`);
+      }
+      if (!response.ok && response.status !== 206) {
+        throw new Error(`Segment ${index}: HTTP ${response.status}`);
+      }
+
+      const progress = (end / info.contentSize) * 100;
+      dispatchProgress(videoId, progress, page, downloadId);
+
+      return response.arrayBuffer();
+    };
+  });
+}
+
 async function executeBatched(
   fetchers: Array<() => Promise<ArrayBuffer>>,
   batchSize: number,
-  enableRetry: boolean,
 ): Promise<ArrayBuffer[]> {
   const results: ArrayBuffer[] = [];
   let offset = 0;
 
   while (offset < fetchers.length) {
-    const batch = fetchers.slice(offset, offset + batchSize);
-    const batchPromises = batch.map((fn) => fn());
-
+    const batch = fetchers.slice(offset, offset + batchSize).map((fn) => fn());
     try {
-      const batchResults = await Promise.all(batchPromises);
+      const batchResults = await Promise.all(batch);
       results.push(...batchResults);
       offset += batchSize;
-    } catch (error) {
-      if (enableRetry && error instanceof FetchRetryError) {
-        // Retry from the failed segment
-        logger.info(`Retrying from segment ${error.segmentIndex}...`);
-        offset = error.segmentIndex;
-        await delay(1000);
+    } catch (err) {
+      if (err instanceof FetchRetryError) {
+        offset = err.segmentIndex;
+        await new Promise((r) => setTimeout(r, 1000));
       } else {
-        throw error;
+        throw err;
       }
     }
   }
@@ -298,72 +265,64 @@ async function executeBatched(
   return results;
 }
 
-/** Parallel segmented download */
 async function downloadSegmented(
   url: string,
   videoId: string,
   page?: string,
   downloadId?: string,
 ): Promise<void> {
-  const segmentInfo = await probeSegmentInfo(url);
+  const info = await probeSegmentInfo(url);
+  const ext = info.contentType.split('/')[1] || 'mp4';
+  const fileName = extractFileName(url, videoId, ext);
 
-  const fetchers = createSegmentFetchers(url, segmentInfo, videoId, page, downloadId);
+  logger.info(
+    `Segmented download: ${info.segmentCount} segments, ${formatBytes(info.contentSize)}`,
+    fileName,
+  );
 
-  const fileName = extractFileName(url, videoId, segmentInfo.contentType.split('/')[1] || 'mp4');
+  const fetchers = createSegmentFetchers(url, info, videoId, page, downloadId);
+  const batchSize = currentSettings.parallelChunks || 20;
+  const segments = await executeBatched(fetchers, batchSize);
 
-  logger.info(`Starting segmented download: ${segmentInfo.segmentCount} segments, ${formatBytes(segmentInfo.contentSize)}`, fileName);
-
-  const segments = await executeBatched(fetchers, 20, true);
-
-  logger.info('All segments downloaded. Merging...', fileName);
-  const finalBlob = new Blob(segments, { type: segmentInfo.contentType });
-
+  const finalBlob = new Blob(segments, { type: info.contentType });
   dispatchProgress(videoId, 100, page, downloadId);
   triggerDownload(finalBlob, fileName);
 }
 
 // ============================================================
-// Download Trigger
+// Download trigger
 // ============================================================
 
 function triggerDownload(blob: Blob, fileName: string): void {
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = withFolder(fileName);  // e.g. "TeleDown/video.mp4"
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  logger.info(`Download triggered: ${fileName} (${formatBytes(blob.size)})`);
+  logger.info(`Download triggered: ${a.download} (${formatBytes(blob.size)})`);
 }
 
 // ============================================================
 // Utilities
 // ============================================================
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
+  if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
 }
 
 // ============================================================
-// Main Entry - Event Listener
+// Main entry
 // ============================================================
 
 async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
   const { video_url, video_id, page, download_id } = src;
-
-  if (!video_url) {
-    logger.error('No video URL provided');
-    return;
-  }
+  if (!video_url) return;
 
   try {
     if (video_url.startsWith('blob:')) {
@@ -372,16 +331,13 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
       await downloadSegmented(video_url, video_id, page, download_id);
     }
   } catch (error) {
-    logger.error(error instanceof Error ? error.message : String(error), video_id);
-    // Dispatch error event
-    const evt = new CustomEvent(`${video_id}_video_download_error`, {
-      detail: {
-        video_id,
-        error: error instanceof Error ? error.message : String(error),
-        download_id,
-      },
-    });
-    document.dispatchEvent(evt);
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error(msg, video_id);
+    document.dispatchEvent(
+      new CustomEvent(`${video_id}_video_download_error`, {
+        detail: { video_id, error: msg, download_id },
+      }),
+    );
   }
 }
 
@@ -392,7 +348,6 @@ document.addEventListener('video_download', ((event: CustomEvent<VideoDownloadDe
     handleSingleDownload(video_src as SingleVideoSource);
   } else if (type === 'batch') {
     const sources = video_src as SingleVideoSource[];
-    // Process batch downloads sequentially to avoid overwhelming the network
     sources.reduce(
       (chain, src) => chain.then(() => handleSingleDownload(src)),
       Promise.resolve(),
@@ -400,4 +355,4 @@ document.addEventListener('video_download', ((event: CustomEvent<VideoDownloadDe
   }
 }) as EventListener);
 
-logger.info('Download script injected and ready.');
+logger.info('Downloader ready (folder: ' + currentSettings.downloadFolder + ')');

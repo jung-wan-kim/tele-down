@@ -11,15 +11,13 @@ import type { DownloadProgress, ExtensionSettings, BackgroundMessage } from '../
 import { DEFAULT_SETTINGS } from '../types/messages';
 
 // ============================================================
-// Download State Management
+// Download State
 // ============================================================
 
-/** In-memory download state (also persisted to chrome.storage) */
 const activeDownloads = new Map<string, DownloadProgress>();
 
 async function saveDownloadsToStorage(): Promise<void> {
-  const data = Object.fromEntries(activeDownloads);
-  await chrome.storage.local.set({ downloads: data });
+  await chrome.storage.local.set({ downloads: Object.fromEntries(activeDownloads) });
 }
 
 async function loadDownloadsFromStorage(): Promise<void> {
@@ -31,7 +29,7 @@ async function loadDownloadsFromStorage(): Promise<void> {
 }
 
 // ============================================================
-// Settings Management
+// Settings
 // ============================================================
 
 async function getSettings(): Promise<ExtensionSettings> {
@@ -50,7 +48,7 @@ async function saveSettings(settings: ExtensionSettings): Promise<void> {
 chrome.runtime.onMessage.addListener(
   (message: BackgroundMessage, _sender, sendResponse) => {
     handleMessage(message, sendResponse);
-    return true; // Keep the message channel open for async response
+    return true;
   },
 );
 
@@ -61,39 +59,32 @@ async function handleMessage(
   try {
     switch (message.action) {
       case 'getDownloads': {
-        const downloads = Object.fromEntries(activeDownloads);
-        sendResponse({ success: true, data: downloads });
+        sendResponse({ success: true, data: Object.fromEntries(activeDownloads) });
         break;
       }
 
       case 'downloadStarted': {
-        const { data } = message;
-        activeDownloads.set(data.downloadId, data);
+        activeDownloads.set(message.data.downloadId, message.data);
         await saveDownloadsToStorage();
-        // Notify popup of change
-        notifyPopup('downloadUpdated', data);
+        notifyPopup('downloadUpdated', message.data);
         sendResponse({ success: true });
         break;
       }
 
       case 'downloadProgress': {
-        const { data } = message;
-        activeDownloads.set(data.downloadId, data);
-        // Don't persist every progress update (too frequent)
-        notifyPopup('downloadUpdated', data);
+        activeDownloads.set(message.data.downloadId, message.data);
+        notifyPopup('downloadUpdated', message.data);
         sendResponse({ success: true });
         break;
       }
 
       case 'downloadCompleted': {
-        const { data } = message;
-        data.status = 'completed';
-        data.progress = 100;
+        const data = { ...message.data, status: 'completed' as const, progress: 100 };
         activeDownloads.set(data.downloadId, data);
         await saveDownloadsToStorage();
         notifyPopup('downloadUpdated', data);
 
-        // Clean up completed downloads after 60 seconds
+        // Clean up after 60s
         setTimeout(() => {
           activeDownloads.delete(data.downloadId);
           saveDownloadsToStorage();
@@ -105,8 +96,7 @@ async function handleMessage(
       }
 
       case 'downloadError': {
-        const { data } = message;
-        data.status = 'error';
+        const data = { ...message.data, status: 'error' as const };
         activeDownloads.set(data.downloadId, data);
         await saveDownloadsToStorage();
         notifyPopup('downloadUpdated', data);
@@ -130,7 +120,7 @@ async function handleMessage(
         sendResponse({ success: false, error: 'Unknown action' });
     }
   } catch (error) {
-    console.error('[TeleDown BG] Error handling message:', error);
+    console.error('[TeleDown BG] Error:', error);
     sendResponse({
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -143,24 +133,19 @@ async function handleMessage(
 // ============================================================
 
 function notifyPopup(type: string, data: unknown): void {
-  chrome.runtime.sendMessage({ type, data }).catch(() => {
-    // Popup not open, ignore
-  });
+  chrome.runtime.sendMessage({ type, data }).catch(() => {});
 }
 
 // ============================================================
-// Initialization
+// Init
 // ============================================================
 
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install') {
-    console.log('[TeleDown] Extension installed');
-    // Set default settings
     saveSettings(DEFAULT_SETTINGS);
+    console.log('[TeleDown] Installed with default settings');
   }
 });
 
-// Load persisted downloads on startup
 loadDownloadsFromStorage();
-
 console.log('[TeleDown] Background service worker started');

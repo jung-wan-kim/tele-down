@@ -1,21 +1,15 @@
 /**
  * TeleDown - Popup Script
- *
- * Manages the extension popup UI:
- * - Displays active downloads with progress
- * - Settings management
- * - Connection status to Telegram Web
  */
 
 import type { DownloadProgress, ExtensionSettings } from '../types/messages';
 import { DEFAULT_SETTINGS } from '../types/messages';
 
 // ============================================================
-// DOM Elements
+// DOM
 // ============================================================
 
-const $ = <T extends HTMLElement>(id: string): T =>
-  document.getElementById(id) as T;
+const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
 const statusBar = $<HTMLDivElement>('statusBar');
 const statusText = statusBar.querySelector('.status-text') as HTMLSpanElement;
@@ -23,7 +17,12 @@ const downloadCount = $<HTMLSpanElement>('downloadCount');
 const downloadList = $<HTMLDivElement>('downloadList');
 const emptyState = $<HTMLDivElement>('emptyState');
 
-// Settings inputs
+// Quick settings
+const autoDownloadInput = $<HTMLInputElement>('autoDownload');
+const downloadFolderInput = $<HTMLInputElement>('downloadFolder');
+const folderPreview = $<HTMLSpanElement>('folderPreview');
+
+// Advanced settings
 const parallelChunksInput = $<HTMLInputElement>('parallelChunks');
 const parallelDownloadsInput = $<HTMLInputElement>('parallelDownloads');
 const autoRetryInput = $<HTMLInputElement>('autoRetry');
@@ -34,75 +33,59 @@ const maxRetriesInput = $<HTMLInputElement>('maxRetries');
 // ============================================================
 
 const downloads = new Map<string, DownloadProgress>();
+let currentSettings: ExtensionSettings = { ...DEFAULT_SETTINGS };
+let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // ============================================================
-// Status Check
+// Status
 // ============================================================
 
-async function checkTelegramTab(): Promise<boolean> {
+async function updateStatus(): Promise<void> {
   try {
     const tabs = await chrome.tabs.query({
       url: 'https://web.telegram.org/*',
       active: true,
       currentWindow: true,
     });
-    return tabs.length > 0;
+    if (tabs.length > 0) {
+      statusBar.classList.add('active');
+      statusText.textContent = 'Telegram Web 연결됨';
+    } else {
+      statusBar.classList.remove('active');
+      statusText.textContent = 'Telegram Web을 열어주세요';
+    }
   } catch {
-    return false;
-  }
-}
-
-async function updateStatus(): Promise<void> {
-  const isTelegramOpen = await checkTelegramTab();
-
-  if (isTelegramOpen) {
-    statusBar.classList.add('active');
-    statusText.textContent = 'Connected to Telegram Web';
-  } else {
     statusBar.classList.remove('active');
-    statusText.textContent = 'Open Telegram Web to start';
   }
 }
 
 // ============================================================
-// Download List Rendering
+// Downloads
 // ============================================================
 
 function createDownloadItemHTML(dl: DownloadProgress): string {
-  const statusClass = dl.status;
-  const progressWidth = dl.status === 'error' ? 100 : dl.progress;
   const displayName = dl.fileName || dl.videoId || 'Unknown';
+  const progressWidth = dl.status === 'error' ? 100 : dl.progress;
 
-  let statusLabel = '';
-  switch (dl.status) {
-    case 'downloading':
-      statusLabel = `${Math.round(dl.progress)}%`;
-      break;
-    case 'merging':
-      statusLabel = 'Merging...';
-      break;
-    case 'completed':
-      statusLabel = 'Done';
-      break;
-    case 'error':
-      statusLabel = 'Error';
-      break;
-    default:
-      statusLabel = 'Pending';
-  }
+  const statusLabels: Record<string, string> = {
+    downloading: `${Math.round(dl.progress)}%`,
+    merging: '병합 중...',
+    completed: '완료',
+    error: '오류',
+    pending: '대기 중',
+  };
 
   return `
     <div class="download-item" data-download-id="${dl.downloadId}">
       <div class="download-item-header">
         <span class="download-item-name" title="${displayName}">${displayName}</span>
-        <span class="download-item-status ${statusClass}">${statusLabel}</span>
+        <span class="download-item-status ${dl.status}">${statusLabels[dl.status] || '대기 중'}</span>
       </div>
       <div class="progress-bar">
-        <div class="progress-bar-fill ${statusClass}" style="width: ${progressWidth}%"></div>
+        <div class="progress-bar-fill ${dl.status}" style="width: ${progressWidth}%"></div>
       </div>
       ${dl.error ? `<div class="download-item-meta"><span>${dl.error}</span></div>` : ''}
-    </div>
-  `;
+    </div>`;
 }
 
 function renderDownloads(): void {
@@ -113,36 +96,25 @@ function renderDownloads(): void {
   downloadCount.textContent = String(downloads.size);
   downloadCount.classList.toggle('active', activeCount > 0);
 
+  const items = downloadList.querySelectorAll('.download-item');
+  items.forEach((item) => item.remove());
+
   if (downloads.size === 0) {
     emptyState.style.display = 'flex';
-    // Remove all download items but keep empty state
-    const items = downloadList.querySelectorAll('.download-item');
-    items.forEach((item) => item.remove());
     return;
   }
 
   emptyState.style.display = 'none';
 
-  // Build the download list
-  const sortedDownloads = Array.from(downloads.values()).sort((a, b) => {
-    // Active downloads first, then completed, then errors
-    const order: Record<string, number> = {
-      downloading: 0,
-      merging: 1,
-      pending: 2,
-      completed: 3,
-      error: 4,
-    };
-    return (order[a.status] || 9) - (order[b.status] || 9);
-  });
+  const order: Record<string, number> = {
+    downloading: 0, merging: 1, pending: 2, completed: 3, error: 4,
+  };
 
-  const html = sortedDownloads.map(createDownloadItemHTML).join('');
+  const sorted = Array.from(downloads.values()).sort(
+    (a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9),
+  );
 
-  // Replace existing items
-  const existingItems = downloadList.querySelectorAll('.download-item');
-  existingItems.forEach((item) => item.remove());
-
-  downloadList.insertAdjacentHTML('beforeend', html);
+  downloadList.insertAdjacentHTML('beforeend', sorted.map(createDownloadItemHTML).join(''));
 }
 
 function updateDownload(data: DownloadProgress): void {
@@ -155,54 +127,6 @@ function removeDownload(downloadId: string): void {
   renderDownloads();
 }
 
-// ============================================================
-// Settings Management
-// ============================================================
-
-async function loadSettings(): Promise<void> {
-  try {
-    const response = await chrome.runtime.sendMessage({ action: 'getSettings' });
-    const settings: ExtensionSettings = response?.data || DEFAULT_SETTINGS;
-
-    parallelChunksInput.value = String(settings.parallelChunks);
-    parallelDownloadsInput.value = String(settings.parallelDownloads);
-    autoRetryInput.checked = settings.autoRetry;
-    maxRetriesInput.value = String(settings.maxRetries);
-  } catch {
-    // Use defaults
-    parallelChunksInput.value = String(DEFAULT_SETTINGS.parallelChunks);
-    parallelDownloadsInput.value = String(DEFAULT_SETTINGS.parallelDownloads);
-    autoRetryInput.checked = DEFAULT_SETTINGS.autoRetry;
-    maxRetriesInput.value = String(DEFAULT_SETTINGS.maxRetries);
-  }
-}
-
-async function saveCurrentSettings(): Promise<void> {
-  const settings: ExtensionSettings = {
-    parallelChunks: parseInt(parallelChunksInput.value, 10) || DEFAULT_SETTINGS.parallelChunks,
-    parallelDownloads: parseInt(parallelDownloadsInput.value, 10) || DEFAULT_SETTINGS.parallelDownloads,
-    autoRetry: autoRetryInput.checked,
-    maxRetries: parseInt(maxRetriesInput.value, 10) || DEFAULT_SETTINGS.maxRetries,
-  };
-
-  try {
-    await chrome.runtime.sendMessage({ action: 'saveSettings', data: settings });
-  } catch {
-    console.error('[TeleDown] Failed to save settings');
-  }
-}
-
-function setupSettingsListeners(): void {
-  const inputs = [parallelChunksInput, parallelDownloadsInput, autoRetryInput, maxRetriesInput];
-  inputs.forEach((input) => {
-    input.addEventListener('change', saveCurrentSettings);
-  });
-}
-
-// ============================================================
-// Load Existing Downloads
-// ============================================================
-
 async function loadDownloads(): Promise<void> {
   try {
     const response = await chrome.runtime.sendMessage({ action: 'getDownloads' });
@@ -211,13 +135,90 @@ async function loadDownloads(): Promise<void> {
       entries.forEach(([, dl]) => downloads.set(dl.downloadId, dl));
       renderDownloads();
     }
-  } catch {
-    // No active downloads
-  }
+  } catch { /* No active downloads */ }
 }
 
 // ============================================================
-// Listen for Background Updates
+// Settings
+// ============================================================
+
+function applySettingsToUI(settings: ExtensionSettings): void {
+  autoDownloadInput.checked = settings.autoDownload;
+  downloadFolderInput.value = settings.downloadFolder;
+  folderPreview.textContent = settings.downloadFolder || 'TeleDown';
+  parallelChunksInput.value = String(settings.parallelChunks);
+  parallelDownloadsInput.value = String(settings.parallelDownloads);
+  autoRetryInput.checked = settings.autoRetry;
+  maxRetriesInput.value = String(settings.maxRetries);
+}
+
+async function loadSettings(): Promise<void> {
+  try {
+    const response = await chrome.runtime.sendMessage({ action: 'getSettings' });
+    if (response?.data) {
+      currentSettings = { ...DEFAULT_SETTINGS, ...response.data };
+    }
+  } catch { /* Use defaults */ }
+  applySettingsToUI(currentSettings);
+}
+
+/** Debounced save + broadcast to content script */
+function scheduleSettingsSave(): void {
+  if (saveTimeout) clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(async () => {
+    try {
+      await chrome.runtime.sendMessage({ action: 'saveSettings', data: currentSettings });
+
+      // Broadcast to all Telegram Web tabs
+      const tabs = await chrome.tabs.query({ url: 'https://web.telegram.org/*' });
+      for (const tab of tabs) {
+        if (tab.id) {
+          chrome.tabs.sendMessage(tab.id, {
+            type: 'settingsUpdated',
+            data: currentSettings,
+          }).catch(() => {});
+        }
+      }
+    } catch { /* Ignore */ }
+  }, 500);
+}
+
+function setupSettingsListeners(): void {
+  autoDownloadInput.addEventListener('change', () => {
+    currentSettings.autoDownload = autoDownloadInput.checked;
+    scheduleSettingsSave();
+  });
+
+  downloadFolderInput.addEventListener('input', () => {
+    const val = downloadFolderInput.value.trim() || 'TeleDown';
+    currentSettings.downloadFolder = val;
+    folderPreview.textContent = val;
+    scheduleSettingsSave();
+  });
+
+  parallelChunksInput.addEventListener('change', () => {
+    currentSettings.parallelChunks = parseInt(parallelChunksInput.value, 10) || 20;
+    scheduleSettingsSave();
+  });
+
+  parallelDownloadsInput.addEventListener('change', () => {
+    currentSettings.parallelDownloads = parseInt(parallelDownloadsInput.value, 10) || 3;
+    scheduleSettingsSave();
+  });
+
+  autoRetryInput.addEventListener('change', () => {
+    currentSettings.autoRetry = autoRetryInput.checked;
+    scheduleSettingsSave();
+  });
+
+  maxRetriesInput.addEventListener('change', () => {
+    currentSettings.maxRetries = parseInt(maxRetriesInput.value, 10) || 3;
+    scheduleSettingsSave();
+  });
+}
+
+// ============================================================
+// Background message listener
 // ============================================================
 
 chrome.runtime.onMessage.addListener((message) => {
@@ -229,15 +230,11 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 // ============================================================
-// Initialization
+// Init
 // ============================================================
 
 async function init(): Promise<void> {
-  await Promise.all([
-    updateStatus(),
-    loadSettings(),
-    loadDownloads(),
-  ]);
+  await Promise.all([updateStatus(), loadSettings(), loadDownloads()]);
   setupSettingsListeners();
   renderDownloads();
 }

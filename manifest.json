@@ -27,7 +27,7 @@
       "run_at": "document_end"
     }
   ],
-  "permissions": ["storage", "activeTab"],
+  "permissions": ["storage", "activeTab", "downloads"],
   "host_permissions": ["https://web.telegram.org/*"],
   "web_accessible_resources": [
     {

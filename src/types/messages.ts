@@ -9,18 +9,15 @@ export interface VideoSource {
   downloadId?: string;
 }
 
-/** Download request from content script to inject script */
-export interface DownloadRequest {
-  type: 'single' | 'batch';
-  videos: VideoSource[];
-}
+/** Download status */
+export type VideoStatus = 'pending' | 'downloading' | 'merging' | 'completed' | 'error';
 
 /** Download progress update */
 export interface DownloadProgress {
   videoId: string;
   downloadId: string;
   progress: number; // 0-100
-  status: 'pending' | 'downloading' | 'merging' | 'completed' | 'error';
+  status: VideoStatus;
   fileName?: string;
   error?: string;
 }
@@ -37,10 +34,14 @@ export type BackgroundMessage =
 
 /** Extension settings */
 export interface ExtensionSettings {
-  parallelChunks: number;    // Number of parallel chunk downloads (default: 20)
-  parallelDownloads: number; // Number of parallel file downloads (default: 3)
-  autoRetry: boolean;        // Auto-retry on failure (default: true)
-  maxRetries: number;        // Max retry attempts (default: 3)
+  parallelChunks: number;
+  parallelDownloads: number;
+  autoRetry: boolean;
+  maxRetries: number;
+  /** Subfolder name inside Downloads directory */
+  downloadFolder: string;
+  /** Automatically download detected videos without clicking Start */
+  autoDownload: boolean;
 }
 
 /** Default settings */
@@ -49,4 +50,6 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   parallelDownloads: 3,
   autoRetry: true,
   maxRetries: 3,
+  downloadFolder: 'TeleDown',
+  autoDownload: false,
 };
