@@ -11,7 +11,7 @@
  * 7. Chat navigation detection (URL change)
  */
 
-import { startWatching, clearSeenVideos, type DetectedVideo } from './detector';
+import { startWatching, clearSeenVideos, tryGetVideoUrl, triggerVideoLoad, type DetectedVideo } from './detector';
 import {
   injectDownloadButtons,
   setDownloadHandler,
@@ -37,6 +37,8 @@ interface QueueItem {
   videoUrl: string;
   status: VideoStatus;
   progress: number;
+  /** Reference to the DOM container for URL resolution */
+  containerElement?: HTMLElement;
 }
 
 /** All detected videos for the current chat */
@@ -204,9 +206,41 @@ function requestDownload(videoUrl: string, videoId: string): void {
   );
 }
 
+/** Resolve URLs for pending videos that don't have one yet */
+async function resolveVideoUrls(): Promise<void> {
+  const needsUrl = Array.from(videoQueue.values()).filter(
+    (v) => v.status === 'pending' && !v.videoUrl && v.containerElement,
+  );
+
+  if (needsUrl.length === 0) return;
+
+  console.log(`[TeleDown] Resolving URLs for ${needsUrl.length} video(s)...`);
+
+  for (const item of needsUrl) {
+    if (!item.containerElement) continue;
+
+    // First try without scrolling (maybe it loaded since detection)
+    let url = tryGetVideoUrl(item.containerElement);
+    if (!url) {
+      // Scroll into view to trigger Telegram's lazy loading
+      url = await triggerVideoLoad(item.containerElement);
+    }
+
+    if (url) {
+      item.videoUrl = url;
+      console.log(`[TeleDown] Resolved URL for ${item.videoId}`);
+    }
+  }
+}
+
 /** Download all pending videos (respects parallelDownloads setting) */
 async function startAllPendingDownloads(): Promise<void> {
-  const pending = Array.from(videoQueue.values()).filter((v) => v.status === 'pending');
+  // First, resolve URLs for videos that don't have one yet
+  await resolveVideoUrls();
+
+  const pending = Array.from(videoQueue.values()).filter(
+    (v) => v.status === 'pending' && v.videoUrl,
+  );
   if (pending.length === 0) return;
 
   const parallel = settings.parallelDownloads || 3;
@@ -215,9 +249,8 @@ async function startAllPendingDownloads(): Promise<void> {
   for (let i = 0; i < pending.length; i += parallel) {
     const batch = pending.slice(i, i + parallel);
     batch.forEach((item) => requestDownload(item.videoUrl, item.videoId));
-    // Small delay between batches to avoid overwhelming the network
     if (i + parallel < pending.length) {
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
 }
@@ -255,30 +288,38 @@ function onVideosDetected(videos: DetectedVideo[]): void {
   let newlyAdded = 0;
 
   for (const video of videos) {
-    if (!videoQueue.has(video.videoId)) {
+    const existing = videoQueue.get(video.videoId);
+    if (!existing) {
       videoQueue.set(video.videoId, {
         videoId: video.videoId,
         videoUrl: video.videoUrl,
         status: 'pending',
         progress: 0,
+        containerElement: video.containerElement,
       });
       newlyAdded++;
+    } else if (!existing.videoUrl && video.videoUrl) {
+      // URL became available (lazy-loaded) - update it
+      existing.videoUrl = video.videoUrl;
+      existing.containerElement = video.containerElement;
     }
   }
 
-  // Inject download buttons
-  injectDownloadButtons(videos);
+  // Inject download buttons (only for videos with URLs)
+  const videosWithUrls = videos.filter((v) => v.videoUrl);
+  if (videosWithUrls.length > 0) {
+    injectDownloadButtons(videosWithUrls);
+  }
 
   // Show / update panel
   showControlPanel(computePanelState());
 
-  // Auto-download newly detected videos (stagger to avoid overwhelming SW)
+  // Auto-download newly detected videos that have URLs
   if (settings.autoDownload && newlyAdded > 0) {
     const newVideos = videos.filter((v) => {
       const item = videoQueue.get(v.videoId);
-      return item?.status === 'pending';
+      return item?.status === 'pending' && item.videoUrl;
     });
-    // Stagger auto-downloads with delay between each
     newVideos.forEach((v, i) => {
       setTimeout(() => requestDownload(v.videoUrl, v.videoId), i * 1000);
     });
@@ -358,6 +399,20 @@ function onAutoDownloadToggle(enabled: boolean): void {
     startAllPendingDownloads();
   }
 }
+
+// ============================================================
+// File save handler (inject script → content → background)
+// ============================================================
+
+document.addEventListener('tele_down_save', ((event: CustomEvent) => {
+  const { blobUrl, fileName, folder } = event.detail;
+  chrome.runtime.sendMessage({
+    action: 'saveToDisk',
+    data: { blobUrl, fileName, folder },
+  }).catch((err) => {
+    console.error('[TeleDown] saveToDisk failed:', err);
+  });
+}) as EventListener);
 
 // ============================================================
 // Background message listener (settings updates from popup)

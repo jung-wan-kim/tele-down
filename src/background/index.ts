@@ -116,6 +116,23 @@ async function handleMessage(
         break;
       }
 
+      case 'saveToDisk': {
+        const { blobUrl, fileName, folder } = message.data;
+        const filePath = folder ? `${folder}/${fileName}` : fileName;
+        try {
+          const downloadId = await chrome.downloads.download({
+            url: blobUrl,
+            filename: filePath,
+            conflictAction: 'uniquify',
+          });
+          sendResponse({ success: true, downloadId });
+        } catch (err) {
+          console.error('[TeleDown BG] Download failed:', err);
+          sendResponse({ success: false, error: String(err) });
+        }
+        break;
+      }
+
       default:
         sendResponse({ success: false, error: 'Unknown action' });
     }

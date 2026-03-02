@@ -43,11 +43,6 @@
     if (videoId) return `${videoId}.${extension}`;
     return `${Math.random().toString(36).substring(2, 10)}.${extension}`;
   }
-  function withFolder(fileName) {
-    const folder = currentSettings.downloadFolder?.trim();
-    if (!folder) return fileName;
-    return `${folder}/${fileName}`;
-  }
   function dispatchProgress(videoId, progress, page, downloadId) {
     if (!videoId) return;
     document.dispatchEvent(
@@ -178,15 +173,18 @@
     triggerDownload(finalBlob, fileName);
   }
   function triggerDownload(blob, fileName) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = withFolder(fileName);
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    logger.info(`Download triggered: ${a.download} (${formatBytes(blob.size)})`);
+    const blobUrl = URL.createObjectURL(blob);
+    document.dispatchEvent(
+      new CustomEvent("tele_down_save", {
+        detail: {
+          blobUrl,
+          fileName,
+          folder: currentSettings.downloadFolder || "TeleDown"
+        }
+      })
+    );
+    logger.info(`Download dispatched: ${currentSettings.downloadFolder}/${fileName} (${formatBytes(blob.size)})`);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 6e4);
   }
   function formatBytes(bytes) {
     if (!bytes) return "0 B";

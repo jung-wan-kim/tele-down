@@ -1,28 +1,32 @@
 /**
  * TeleDown - Video Detector
  *
- * Monitors the Telegram Web DOM for video elements and extracts
- * their source URLs for downloading.
+ * Detects video messages in Telegram Web by scanning DOM containers,
+ * NOT just <video> elements with src. This allows detection on chat entry
+ * before Telegram lazy-loads video sources.
+ *
+ * Two-phase approach:
+ * 1. Container detection: Find .bubble / [data-message-id] with video indicators
+ *    (.video-time, video element, .media-video, etc.)
+ * 2. URL extraction: Try to get video src; if unavailable, content script
+ *    triggers lazy loading by scrolling into view.
  *
  * Supports:
- * - Telegram Web K (web.telegram.org/k/) - uses .bubble, data-mid, video.full-media
- * - Telegram Web A (web.telegram.org/a/) - uses data-message-id, .full-media
- * - Chat messages (inline videos, round videos, document videos)
- * - Media viewer (full-screen video overlay)
- * - Shared media panel (right column search results)
- * - Stories viewer
+ * - Telegram Web K (web.telegram.org/k/)
+ * - Telegram Web A (web.telegram.org/a/)
+ * - Chat messages, media viewer, stories, shared media panel
  */
 
 export interface DetectedVideo {
   /** Unique identifier derived from the message */
   videoId: string;
-  /** The video source URL (streaming or blob) */
+  /** The video source URL (may be empty if not yet loaded) */
   videoUrl: string;
   /** The DOM element containing the video */
   containerElement: HTMLElement;
   /** Optional file name hint */
   fileName?: string;
-  /** Source context: 'chat' | 'viewer' | 'panel' | 'story' */
+  /** Source context */
   source?: string;
 }
 
@@ -37,7 +41,6 @@ function detectPlatform(): TelegramPlatform {
   if (url.includes('/k/') || url.includes('/k#') || url.endsWith('/k')) return 'k';
   if (url.includes('/a/') || url.includes('/a#') || url.endsWith('/a')) return 'a';
 
-  // Heuristic: Web K uses .bubbles-group, Web A uses .messages-container
   if (document.querySelector('.bubbles-group') || document.querySelector('.bubbles')) return 'k';
   if (document.querySelector('.messages-container') || document.querySelector('.MessageList')) return 'a';
 
@@ -48,44 +51,27 @@ function detectPlatform(): TelegramPlatform {
 // Video Source Extraction
 // ============================================================
 
-/**
- * Extract video URL from a video element.
- * Telegram Web uses <video src="...">, <video><source src="...">, or blob URLs.
- * Videos may also have currentSrc set by the player.
- */
+/** Extract video URL from a video element (may return null if not yet loaded) */
 function getVideoUrl(video: HTMLVideoElement): string | null {
-  // Direct src attribute (most common in Telegram Web)
   const src = video.getAttribute('src');
   if (src && (src.includes('stream/') || src.includes('progressive/') || src.startsWith('blob:') || src.startsWith('http'))) {
     return src;
   }
 
-  // Check source child elements (used in stories)
   const sourceEl = video.querySelector('source');
   if (sourceEl) {
     const sourceSrc = sourceEl.getAttribute('src');
     if (sourceSrc) return sourceSrc;
   }
 
-  // currentSrc (set by the media player)
-  if (video.currentSrc) {
-    return video.currentSrc;
-  }
-
-  // Raw src as last resort
-  if (video.src) {
-    return video.src;
-  }
+  if (video.currentSrc) return video.currentSrc;
+  if (video.src) return video.src;
 
   return null;
 }
 
-/**
- * Check if a URL looks like a valid Telegram video URL.
- */
 function isValidVideoUrl(url: string | null): url is string {
   if (!url) return false;
-  // Must be blob, stream, progressive, or http(s) URL
   return (
     url.startsWith('blob:') ||
     url.includes('stream/') ||
@@ -99,83 +85,114 @@ function isValidVideoUrl(url: string | null): url is string {
 // Video ID Extraction
 // ============================================================
 
-/**
- * Extract a unique video ID from the message container.
- * Web K: data-mid attribute
- * Web A: data-message-id attribute
- */
-function getVideoId(element: HTMLElement, platform: TelegramPlatform): string {
-  // Walk up the DOM looking for message ID attributes
+function getVideoId(element: HTMLElement, _platform: TelegramPlatform): string {
   let current: HTMLElement | null = element;
   while (current) {
-    // Web K: data-mid
     const mid = current.getAttribute('data-mid');
     if (mid) return `k-${mid}`;
 
-    // Web A: data-message-id
     const msgId = current.getAttribute('data-message-id');
     if (msgId) return `a-${msgId}`;
 
-    // Also check parent's data-mid (video elements are nested deeply)
     current = current.parentElement;
   }
 
-  // Fallback: generate from content/position
   return `vid-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 }
 
-/**
- * Get video ID specifically for media viewer context.
- * The media viewer may have URL fragments like #msgId or data attributes.
- */
 function getMediaViewerVideoId(): string {
-  // Try to extract from URL hash (Telegram often has message ID in hash)
   const hash = window.location.hash;
   const hashMatch = hash.match(/(\d+)$/);
   if (hashMatch) return `viewer-${hashMatch[1]}`;
-
   return `viewer-${Date.now()}`;
 }
 
 // ============================================================
-// Chat Message Video Detection
+// Deduplication
+// ============================================================
+
+const seenVideoIds = new Set<string>();
+
+/** Clear seen video IDs (call on chat change) */
+export function clearSeenVideos(): void {
+  seenVideoIds.clear();
+}
+
+// ============================================================
+// Container-Based Video Detection (Phase 1)
 // ============================================================
 
 /**
- * Scan chat messages for video elements.
- * Telegram Web K: .bubble contains video.full-media or .media-video
- * Telegram Web A: [data-message-id] contains video.full-media
+ * Find ALL video message containers in chat, even without loaded video src.
+ * Looks for visual indicators: .video-time, video element, .media-video, etc.
  */
-function scanChatVideos(platform: TelegramPlatform): DetectedVideo[] {
+function scanVideoContainers(platform: TelegramPlatform): DetectedVideo[] {
   const detected: DetectedVideo[] = [];
 
-  // Strategy 1: Find all video elements with full-media class (primary for both K and A)
-  const fullMediaVideos = document.querySelectorAll<HTMLVideoElement>('video.full-media');
-  fullMediaVideos.forEach((video) => {
-    processVideoElement(video, platform, 'chat', detected);
-  });
+  if (platform === 'k' || platform === 'unknown') {
+    // Web K: .bubble elements with video indicators
+    document.querySelectorAll<HTMLElement>('.bubble').forEach((bubble) => {
+      const hasVideoTime = bubble.querySelector('.video-time') !== null;
+      const hasVideo = bubble.querySelector('video') !== null;
+      const hasMediaVideo = bubble.querySelector('.media-video') !== null;
+      const hasRoundVideo = bubble.querySelector('.round-video-wrapper') !== null;
 
-  // Strategy 2: Find .media-video elements (Web K specific)
-  const mediaVideos = document.querySelectorAll<HTMLVideoElement>('video.media-video');
-  mediaVideos.forEach((video) => {
-    processVideoElement(video, platform, 'chat', detected);
-  });
+      if (!hasVideoTime && !hasVideo && !hasMediaVideo && !hasRoundVideo) return;
 
-  // Strategy 3: Find any video inside message bubbles/containers that wasn't caught above
-  const videoSelectors = platform === 'k'
-    ? '.bubble video, .document-container video'
-    : '[data-message-id] video, .Message video';
+      const videoId = getVideoId(bubble, platform);
+      if (seenVideoIds.has(videoId)) return;
+      seenVideoIds.add(videoId);
 
-  const bubbleVideos = document.querySelectorAll<HTMLVideoElement>(videoSelectors);
-  bubbleVideos.forEach((video) => {
-    processVideoElement(video, platform, 'chat', detected);
-  });
+      // Try to get video URL if video element exists
+      const videoEl = bubble.querySelector<HTMLVideoElement>('video');
+      const url = videoEl ? getVideoUrl(videoEl) : null;
 
-  // Strategy 4: Generic fallback - any video on the page that has a valid src
-  const allVideos = document.querySelectorAll<HTMLVideoElement>('video');
-  allVideos.forEach((video) => {
-    processVideoElement(video, platform, 'chat', detected);
-  });
+      // Find the best container for the download button
+      const container = videoEl
+        ? (videoEl.closest<HTMLElement>('.media-container') ||
+           videoEl.closest<HTMLElement>('.document-container') ||
+           bubble)
+        : (bubble.querySelector<HTMLElement>('.media-container') ||
+           bubble.querySelector<HTMLElement>('.attachment') ||
+           bubble);
+
+      detected.push({
+        videoId,
+        videoUrl: url || '', // empty string = URL not yet available
+        containerElement: container,
+        source: 'chat',
+      });
+    });
+  }
+
+  if (platform === 'a' || platform === 'unknown') {
+    // Web A: [data-message-id] elements with video indicators
+    document.querySelectorAll<HTMLElement>('[data-message-id]').forEach((msg) => {
+      const hasVideo = msg.querySelector('video') !== null;
+      const hasVideoTime = msg.querySelector('.video-time') !== null;
+      const hasMediaVideo = msg.querySelector('.media-video') !== null;
+
+      if (!hasVideo && !hasVideoTime && !hasMediaVideo) return;
+
+      const videoId = getVideoId(msg, platform);
+      if (seenVideoIds.has(videoId)) return;
+      seenVideoIds.add(videoId);
+
+      const videoEl = msg.querySelector<HTMLVideoElement>('video');
+      const url = videoEl ? getVideoUrl(videoEl) : null;
+
+      const container = videoEl
+        ? (videoEl.closest<HTMLElement>('.media-inner') || msg)
+        : (msg.querySelector<HTMLElement>('.media-inner') || msg);
+
+      detected.push({
+        videoId,
+        videoUrl: url || '',
+        containerElement: container,
+        source: 'chat',
+      });
+    });
+  }
 
   return detected;
 }
@@ -184,12 +201,7 @@ function scanChatVideos(platform: TelegramPlatform): DetectedVideo[] {
 // Media Viewer Detection
 // ============================================================
 
-/**
- * Scan the media viewer overlay for video.
- * Web K: .media-viewer-movers .media-viewer-aspecter video
- * Web A: .MediaViewerSlide--active video
- */
-function scanMediaViewer(platform: TelegramPlatform): DetectedVideo[] {
+function scanMediaViewer(): DetectedVideo[] {
   const detected: DetectedVideo[] = [];
 
   // Web K media viewer
@@ -200,58 +212,24 @@ function scanMediaViewer(platform: TelegramPlatform): DetectedVideo[] {
     const url = getVideoUrl(kViewerVideo);
     if (isValidVideoUrl(url)) {
       const container = kViewerVideo.closest<HTMLElement>('.media-viewer-aspecter') ||
-        kViewerVideo.closest<HTMLElement>('.media-viewer-movers') ||
         kViewerVideo.parentElement!;
       const videoId = getMediaViewerVideoId();
-
-      if (!container.querySelector('.tele-down-btn')) {
-        detected.push({
-          videoId,
-          videoUrl: url,
-          containerElement: container,
-          source: 'viewer',
-        });
+      if (!seenVideoIds.has(videoId)) {
+        seenVideoIds.add(videoId);
+        detected.push({ videoId, videoUrl: url, containerElement: container, source: 'viewer' });
       }
     }
   }
 
   // Web A media viewer
-  const aViewerVideos = document.querySelectorAll<HTMLVideoElement>(
-    '.MediaViewerSlide--active video'
-  );
-  aViewerVideos.forEach((video) => {
+  document.querySelectorAll<HTMLVideoElement>('.MediaViewerSlide--active video').forEach((video) => {
     const url = getVideoUrl(video);
     if (isValidVideoUrl(url)) {
-      const container = video.closest<HTMLElement>('.MediaViewerSlide--active') ||
-        video.parentElement!;
+      const container = video.closest<HTMLElement>('.MediaViewerSlide--active') || video.parentElement!;
       const videoId = getMediaViewerVideoId();
-
-      if (!container.querySelector('.tele-down-btn')) {
-        detected.push({
-          videoId,
-          videoUrl: url,
-          containerElement: container,
-          source: 'viewer',
-        });
-      }
-    }
-  });
-
-  // Generic: div.media-viewer-whole
-  const genericViewerVideos = document.querySelectorAll<HTMLVideoElement>(
-    'div.media-viewer-whole video'
-  );
-  genericViewerVideos.forEach((video) => {
-    const url = getVideoUrl(video);
-    if (isValidVideoUrl(url)) {
-      const container = video.closest<HTMLElement>('.media-viewer-whole') || video.parentElement!;
-      if (!container.querySelector('.tele-down-btn')) {
-        detected.push({
-          videoId: getMediaViewerVideoId(),
-          videoUrl: url,
-          containerElement: container,
-          source: 'viewer',
-        });
+      if (!seenVideoIds.has(videoId)) {
+        seenVideoIds.add(videoId);
+        detected.push({ videoId, videoUrl: url, containerElement: container, source: 'viewer' });
       }
     }
   });
@@ -263,77 +241,23 @@ function scanMediaViewer(platform: TelegramPlatform): DetectedVideo[] {
 // Stories Viewer Detection
 // ============================================================
 
-/**
- * Scan stories viewer for video.
- * Web K: #stories-viewer video.media-video source
- * Web A: #StoryViewer .YiuvOPgT video source
- */
 function scanStoriesViewer(): DetectedVideo[] {
   const detected: DetectedVideo[] = [];
 
-  // Web K stories
-  const kStoryVideos = document.querySelectorAll<HTMLVideoElement>('#stories-viewer video.media-video');
-  kStoryVideos.forEach((video) => {
-    const sourceEl = video.querySelector('source');
-    const url = sourceEl?.getAttribute('src') || getVideoUrl(video);
-    if (isValidVideoUrl(url)) {
-      const container = video.closest<HTMLElement>('#stories-viewer') || video.parentElement!;
-      if (!container.querySelector('.tele-down-btn')) {
-        detected.push({
-          videoId: `story-${Date.now()}`,
-          videoUrl: url,
-          containerElement: container,
-          source: 'story',
-        });
-      }
-    }
-  });
-
-  // Web A stories
-  const aStoryVideos = document.querySelectorAll<HTMLVideoElement>('#StoryViewer video');
-  aStoryVideos.forEach((video) => {
-    const sourceEl = video.querySelector('source');
-    const url = sourceEl?.getAttribute('src') || getVideoUrl(video);
-    if (isValidVideoUrl(url)) {
-      const container = video.closest<HTMLElement>('#StoryViewer') || video.parentElement!;
-      if (!container.querySelector('.tele-down-btn')) {
-        detected.push({
-          videoId: `story-${Date.now()}`,
-          videoUrl: url,
-          containerElement: container,
-          source: 'story',
-        });
-      }
-    }
-  });
-
-  return detected;
-}
-
-// ============================================================
-// Shared Media Panel Detection (Right Column Search)
-// ============================================================
-
-/**
- * Scan the shared media panel for video thumbnails.
- * Web K: #column-right .search-super-container-media.active .media-container
- * Web A: #RightColumn .Transition_slide-active .scroll-item
- */
-function scanSharedMediaPanel(platform: TelegramPlatform): DetectedVideo[] {
-  const detected: DetectedVideo[] = [];
-
-  if (platform === 'k') {
-    const mediaContainers = document.querySelectorAll<HTMLElement>(
-      '.search-super-container-media.active .media-container'
-    );
-    mediaContainers.forEach((container) => {
-      // Check if it has a video-time indicator (means it's a video, not a photo)
-      const hasVideoTime = container.querySelector('.video-time') !== null;
-      if (!hasVideoTime) return;
-
-      const video = container.querySelector<HTMLVideoElement>('video');
-      if (video) {
-        processVideoElement(video, platform, 'panel', detected);
+  const storySelectors = ['#stories-viewer video.media-video', '#StoryViewer video'];
+  for (const selector of storySelectors) {
+    document.querySelectorAll<HTMLVideoElement>(selector).forEach((video) => {
+      const sourceEl = video.querySelector('source');
+      const url = sourceEl?.getAttribute('src') || getVideoUrl(video);
+      if (isValidVideoUrl(url)) {
+        const container = video.closest<HTMLElement>('#stories-viewer') ||
+          video.closest<HTMLElement>('#StoryViewer') ||
+          video.parentElement!;
+        const videoId = `story-${Date.now()}`;
+        if (!seenVideoIds.has(videoId)) {
+          seenVideoIds.add(videoId);
+          detected.push({ videoId, videoUrl: url, containerElement: container, source: 'story' });
+        }
       }
     });
   }
@@ -342,114 +266,71 @@ function scanSharedMediaPanel(platform: TelegramPlatform): DetectedVideo[] {
 }
 
 // ============================================================
-// Process a Single Video Element
+// URL Resolution: Try to get URLs for detected videos
 // ============================================================
 
-/** Set of already-seen video IDs to prevent duplicates */
-const seenVideoIds = new Set<string>();
-
 /**
- * Process a video element and add it to the detected list if valid.
- * Deduplicates by videoId.
+ * For a video container that was detected without a URL,
+ * try to extract the URL from its video element (which may have loaded since detection).
  */
-function processVideoElement(
-  video: HTMLVideoElement,
-  platform: TelegramPlatform,
-  source: string,
-  detected: DetectedVideo[],
-): void {
+export function tryGetVideoUrl(container: HTMLElement): string | null {
+  const video = container.querySelector<HTMLVideoElement>('video');
+  if (!video) return null;
   const url = getVideoUrl(video);
-  if (!isValidVideoUrl(url)) return;
-
-  // Find the best container element for placing the download button
-  const container = findBestContainer(video, platform);
-  if (!container) return;
-
-  // Skip if already has a download button
-  if (container.querySelector('.tele-down-btn')) return;
-
-  // Get video ID
-  const videoId = getVideoId(video, platform);
-
-  // Skip duplicates
-  if (seenVideoIds.has(videoId)) return;
-  seenVideoIds.add(videoId);
-
-  detected.push({
-    videoId,
-    videoUrl: url,
-    containerElement: container,
-    source,
-  });
+  return isValidVideoUrl(url) ? url : null;
 }
 
 /**
- * Find the best container element for a video.
- * This is used both for extracting the video ID and for placing the download button.
+ * Scroll a video container into view to trigger Telegram's lazy loading.
+ * Returns a promise that resolves after a delay to allow src to be set.
  */
-function findBestContainer(video: HTMLVideoElement, platform: TelegramPlatform): HTMLElement | null {
-  if (platform === 'k') {
-    // Web K hierarchy: .bubble > ... > .media-container > video.full-media
-    return (
-      video.closest<HTMLElement>('.media-container') ||
-      video.closest<HTMLElement>('.document-container') ||
-      video.closest<HTMLElement>('.bubble') ||
-      video.closest<HTMLElement>('.message') ||
-      video.parentElement
-    );
+export async function triggerVideoLoad(container: HTMLElement): Promise<string | null> {
+  // Find the bubble element to scroll to
+  const bubble = container.closest<HTMLElement>('.bubble') ||
+    container.closest<HTMLElement>('[data-message-id]') ||
+    container;
+
+  // Save current scroll position
+  const scrollContainer = document.querySelector('.bubbles-inner') ||
+    document.querySelector('.MessageList') ||
+    document.querySelector('.messages-container');
+
+  const savedScrollTop = scrollContainer?.scrollTop ?? 0;
+
+  // Scroll the bubble into view to trigger Telegram's lazy loading
+  bubble.scrollIntoView({ behavior: 'instant', block: 'center' });
+
+  // Wait for Telegram to set the video src
+  await new Promise((r) => setTimeout(r, 600));
+
+  // Try to get the URL now
+  const url = tryGetVideoUrl(container);
+
+  // Restore scroll position
+  if (scrollContainer) {
+    scrollContainer.scrollTop = savedScrollTop;
   }
 
-  if (platform === 'a') {
-    // Web A hierarchy: [data-message-id] > ... > .media-inner > video.full-media
-    return (
-      video.closest<HTMLElement>('.media-inner') ||
-      video.closest<HTMLElement>('[data-message-id]') ||
-      video.closest<HTMLElement>('.Message') ||
-      video.parentElement
-    );
-  }
-
-  // Unknown platform: try common selectors
-  return (
-    video.closest<HTMLElement>('.media-container') ||
-    video.closest<HTMLElement>('.media-inner') ||
-    video.closest<HTMLElement>('.bubble') ||
-    video.closest<HTMLElement>('.Message') ||
-    video.closest<HTMLElement>('[data-mid]') ||
-    video.closest<HTMLElement>('[data-message-id]') ||
-    video.parentElement
-  );
+  return url;
 }
 
 // ============================================================
 // Main Scanner
 // ============================================================
 
-/** Clear seen video IDs (call on chat change to allow re-detection) */
-export function clearSeenVideos(): void {
-  seenVideoIds.clear();
-}
-
-/** Scan the current page for all video elements */
+/** Scan the current page for all video containers */
 export function scanForVideos(): DetectedVideo[] {
   const platform = detectPlatform();
   const allDetected: DetectedVideo[] = [];
 
-  // 1. Chat message videos (primary use case)
-  const chatVideos = scanChatVideos(platform);
-  allDetected.push(...chatVideos);
+  // 1. Chat message video containers (primary - detects even without src)
+  allDetected.push(...scanVideoContainers(platform));
 
-  // 2. Media viewer (full-screen overlay)
-  const viewerVideos = scanMediaViewer(platform);
-  allDetected.push(...viewerVideos);
+  // 2. Media viewer
+  allDetected.push(...scanMediaViewer());
 
   // 3. Stories viewer
-  const storyVideos = scanStoriesViewer();
-  allDetected.push(...storyVideos);
-
-  // 4. Shared media panel (right column)
-  const panelVideos = scanSharedMediaPanel(platform);
-  allDetected.push(...panelVideos);
+  allDetected.push(...scanStoriesViewer());
 
   if (allDetected.length > 0) {
     console.log(`[TeleDown] Detected ${allDetected.length} video(s) [platform: ${platform}]`);
@@ -467,7 +348,6 @@ type VideoCallback = (videos: DetectedVideo[]) => void;
 let observer: MutationObserver | null = null;
 let scanTimeout: ReturnType<typeof setTimeout> | null = null;
 
-/** Start watching for new video elements in the DOM */
 export function startWatching(callback: VideoCallback): void {
   if (observer) return;
 
@@ -482,45 +362,32 @@ export function startWatching(callback: VideoCallback): void {
   };
 
   observer = new MutationObserver((mutations) => {
-    // Check if any mutation added video-related elements
     const hasRelevantChanges = mutations.some((mutation) => {
       if (mutation.type === 'childList') {
-        // Check added nodes for video elements or video-containing elements
         return Array.from(mutation.addedNodes).some((node) => {
           if (!(node instanceof HTMLElement)) return false;
 
-          // Direct video element added
           if (node.tagName === 'VIDEO') return true;
-
-          // Container with video inside
-          if (node.querySelector?.('video') !== null) return true;
-
-          // Media viewer opened (Web K)
+          if (node.querySelector?.('video')) return true;
           if (node.classList?.contains('media-viewer-whole')) return true;
-
-          // Media viewer slide (Web A)
           if (node.classList?.contains('MediaViewerSlide--active')) return true;
-
-          // Stories viewer
           if (node.id === 'stories-viewer' || node.id === 'StoryViewer') return true;
 
-          // Bubble with media (Web K) - may contain video that hasn't loaded yet
+          // Bubble with any video indicators (Web K)
           if (node.classList?.contains('bubble')) {
-            const hasVideoTime = node.querySelector('.video-time') !== null;
-            const hasMediaVideo = node.querySelector('.media-video') !== null;
-            if (hasVideoTime || hasMediaVideo) return true;
+            if (node.querySelector('.video-time, video, .media-video, .round-video-wrapper')) return true;
           }
 
-          // Message with media (Web A)
+          // Message with video (Web A)
           if (node.hasAttribute?.('data-message-id')) {
-            if (node.querySelector('video, .media-inner video')) return true;
+            if (node.querySelector('video, .video-time, .media-video')) return true;
           }
 
           return false;
         });
       }
 
-      // Watch for src/currentSrc attribute changes on video elements
+      // Watch for src changes on video elements (lazy loading)
       if (mutation.type === 'attributes' && mutation.target instanceof HTMLVideoElement) {
         return true;
       }
@@ -543,8 +410,7 @@ export function startWatching(callback: VideoCallback): void {
   // Initial scan
   debouncedScan();
 
-  // Also re-scan periodically to catch lazy-loaded videos
-  // Telegram Web loads video sources lazily when they come into viewport
+  // Periodic rescan to catch lazy-loaded URLs
   setInterval(() => {
     const videos = scanForVideos();
     if (videos.length > 0) {
@@ -555,7 +421,6 @@ export function startWatching(callback: VideoCallback): void {
   console.log('[TeleDown] Video watcher started');
 }
 
-/** Stop watching for new videos */
 export function stopWatching(): void {
   if (observer) {
     observer.disconnect();

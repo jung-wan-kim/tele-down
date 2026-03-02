@@ -30,7 +30,8 @@ export type BackgroundMessage =
   | { action: 'downloadCompleted'; data: DownloadProgress }
   | { action: 'downloadError'; data: DownloadProgress }
   | { action: 'getSettings' }
-  | { action: 'saveSettings'; data: ExtensionSettings };
+  | { action: 'saveSettings'; data: ExtensionSettings }
+  | { action: 'saveToDisk'; data: { blobUrl: string; fileName: string; folder: string } };
 
 /** Extension settings */
 export interface ExtensionSettings {

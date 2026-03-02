@@ -331,15 +331,24 @@ async function downloadSegmented(
 // ============================================================
 
 function triggerDownload(blob: Blob, fileName: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = withFolder(fileName);  // e.g. "TeleDown/video.mp4"
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  logger.info(`Download triggered: ${a.download} (${formatBytes(blob.size)})`);
+  const blobUrl = URL.createObjectURL(blob);
+
+  // Dispatch to content script → background → chrome.downloads.download()
+  // This properly saves to the configured subfolder (e.g. Downloads/TeleDown/)
+  document.dispatchEvent(
+    new CustomEvent('tele_down_save', {
+      detail: {
+        blobUrl,
+        fileName,
+        folder: currentSettings.downloadFolder || 'TeleDown',
+      },
+    }),
+  );
+
+  logger.info(`Download dispatched: ${currentSettings.downloadFolder}/${fileName} (${formatBytes(blob.size)})`);
+
+  // Revoke blob URL after a delay (give chrome.downloads time to start)
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
 }
 
 // ============================================================
