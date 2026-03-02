@@ -237,18 +237,25 @@ async function resolveVideoUrls(): Promise<void> {
   }
 }
 
-/** Download all pending videos (respects parallelDownloads setting) */
+/** Download all pending videos (respects parallelDownloads & downloadQueue settings) */
 async function startAllPendingDownloads(): Promise<void> {
   // First, resolve URLs for videos that don't have one yet
   await resolveVideoUrls();
 
-  const pending = Array.from(videoQueue.values()).filter(
+  let pending = Array.from(videoQueue.values()).filter(
     (v) => v.status === 'pending' && v.videoUrl,
   );
   if (pending.length === 0) return;
 
+  // Limit to downloadQueue size
+  const maxQueue = Math.max(1, settings.downloadQueue || 500);
+  if (pending.length > maxQueue) {
+    console.log(`[TeleDown] Queue limit: ${pending.length} → ${maxQueue}`);
+    pending = pending.slice(0, maxQueue);
+  }
+
   const maxParallel = Math.max(1, settings.parallelDownloads || 3);
-  console.log(`[TeleDown] Starting ${pending.length} downloads (${maxParallel} parallel)`);
+  console.log(`[TeleDown] Starting ${pending.length} downloads (${maxParallel} parallel, queue=${maxQueue})`);
 
   // Download in parallel batches of parallelDownloads
   for (let i = 0; i < pending.length; i += maxParallel) {

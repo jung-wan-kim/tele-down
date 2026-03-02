@@ -35,8 +35,12 @@ export type BackgroundMessage =
 
 /** Extension settings */
 export interface ExtensionSettings {
+  /** Number of concurrent segment downloads per file */
   parallelChunks: number;
+  /** Number of concurrent video file downloads */
   parallelDownloads: number;
+  /** Max number of videos in the download queue */
+  downloadQueue: number;
   autoRetry: boolean;
   maxRetries: number;
   /** Subfolder name inside Downloads directory */
@@ -47,8 +51,9 @@ export interface ExtensionSettings {
 
 /** Default settings */
 export const DEFAULT_SETTINGS: ExtensionSettings = {
-  parallelChunks: 20,
+  parallelChunks: 10,
   parallelDownloads: 3,
+  downloadQueue: 500,
   autoRetry: true,
   maxRetries: 3,
   downloadFolder: 'TeleDown',

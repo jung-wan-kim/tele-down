@@ -25,6 +25,7 @@ const folderFullPath = $<HTMLSpanElement>('folderFullPath');
 // Advanced settings
 const parallelChunksInput = $<HTMLInputElement>('parallelChunks');
 const parallelDownloadsInput = $<HTMLInputElement>('parallelDownloads');
+const downloadQueueInput = $<HTMLInputElement>('downloadQueue');
 const autoRetryInput = $<HTMLInputElement>('autoRetry');
 const maxRetriesInput = $<HTMLInputElement>('maxRetries');
 const btnSaveSettings = $<HTMLButtonElement>('btnSaveSettings');
@@ -209,6 +210,7 @@ function applySettingsToUI(settings: ExtensionSettings): void {
   downloadFolderInput.value = settings.downloadFolder;
   parallelChunksInput.value = String(settings.parallelChunks);
   parallelDownloadsInput.value = String(settings.parallelDownloads);
+  downloadQueueInput.value = String(settings.downloadQueue);
   autoRetryInput.checked = settings.autoRetry;
   maxRetriesInput.value = String(settings.maxRetries);
   updateFolderPathDisplay();
@@ -228,8 +230,9 @@ async function loadSettings(): Promise<void> {
 function readFormValues(): void {
   currentSettings.autoDownload = autoDownloadInput.checked;
   currentSettings.downloadFolder = downloadFolderInput.value.trim() || 'TeleDown';
-  currentSettings.parallelChunks = parseInt(parallelChunksInput.value, 10) || 4;
+  currentSettings.parallelChunks = parseInt(parallelChunksInput.value, 10) || 10;
   currentSettings.parallelDownloads = parseInt(parallelDownloadsInput.value, 10) || 3;
+  currentSettings.downloadQueue = parseInt(downloadQueueInput.value, 10) || 500;
   currentSettings.autoRetry = autoRetryInput.checked;
   currentSettings.maxRetries = parseInt(maxRetriesInput.value, 10) || 3;
 }

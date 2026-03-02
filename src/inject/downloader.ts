@@ -22,7 +22,7 @@ interface InjectSettings {
 
 let currentSettings: InjectSettings = {
   downloadFolder: 'TeleDown',
-  parallelChunks: 20,
+  parallelChunks: 10,
 };
 
 // Use window.postMessage (NOT CustomEvent) — CustomEvent.detail is null across Chrome world boundary
@@ -245,14 +245,14 @@ async function downloadSegmented(
   const ext = contentType.split('/')[1] || 'mp4';
   const fileName = extractFileName(url, videoId, ext);
   const numSegments = Math.ceil(contentSize / segmentSize);
-  const maxConcurrent = Math.max(1, currentSettings.parallelChunks || 20);
+  const maxConcurrent = Math.max(1, currentSettings.parallelChunks || 10);
 
   logger.info(
-    `Download: ${numSegments} segments, ${formatBytes(contentSize)}, segSize=${formatBytes(segmentSize)}, concurrent=${maxConcurrent}`,
+    `Download: ${numSegments} segs queued, ${formatBytes(contentSize)}, segSize=${formatBytes(segmentSize)}, concurrent=${maxConcurrent}`,
     fileName,
   );
 
-  // Create all segment ranges
+  // Create all segment ranges (full queue)
   const segments: Array<{ start: number; end: number; idx: number }> = [];
   for (let i = 0; i < numSegments; i++) {
     const start = i * segmentSize;
@@ -260,11 +260,10 @@ async function downloadSegmented(
     segments.push({ start, end, idx: i });
   }
 
-  // Download with concurrency control
+  // Download with concurrency control: process maxConcurrent at a time
   const buffers: ArrayBuffer[] = new Array(numSegments);
   let completedSegments = 0;
 
-  // Process in batches of maxConcurrent
   for (let i = 0; i < segments.length; i += maxConcurrent) {
     const batch = segments.slice(i, i + maxConcurrent);
 

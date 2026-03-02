@@ -3,7 +3,7 @@
   // src/inject/downloader.ts
   var currentSettings = {
     downloadFolder: "TeleDown",
-    parallelChunks: 20
+    parallelChunks: 10
   };
   window.addEventListener("message", (e) => {
     if (e.source !== window || e.data?.type !== "tele_down_settings") return;
@@ -129,9 +129,9 @@
     const ext = contentType.split("/")[1] || "mp4";
     const fileName = extractFileName(url, videoId, ext);
     const numSegments = Math.ceil(contentSize / segmentSize);
-    const maxConcurrent = Math.max(1, currentSettings.parallelChunks || 20);
+    const maxConcurrent = Math.max(1, currentSettings.parallelChunks || 10);
     logger.info(
-      `Download: ${numSegments} segments, ${formatBytes(contentSize)}, segSize=${formatBytes(segmentSize)}, concurrent=${maxConcurrent}`,
+      `Download: ${numSegments} segs queued, ${formatBytes(contentSize)}, segSize=${formatBytes(segmentSize)}, concurrent=${maxConcurrent}`,
       fileName
     );
     const segments = [];
