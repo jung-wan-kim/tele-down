@@ -247,11 +247,33 @@ async function startAllPendingDownloads(): Promise<void> {
   );
   if (pending.length === 0) return;
 
-  // Download one video at a time to avoid overwhelming Telegram's Service Worker
-  for (const item of pending) {
-    requestDownload(item.videoUrl, item.videoId);
-    // Wait a bit before starting the next to stagger requests
-    await new Promise((r) => setTimeout(r, 2000));
+  const maxParallel = Math.max(1, settings.parallelDownloads || 3);
+  console.log(`[TeleDown] Starting ${pending.length} downloads (${maxParallel} parallel)`);
+
+  // Download in parallel batches of parallelDownloads
+  for (let i = 0; i < pending.length; i += maxParallel) {
+    const batch = pending.slice(i, i + maxParallel);
+    batch.forEach((item) => requestDownload(item.videoUrl, item.videoId));
+
+    // Wait for current batch to finish before starting next
+    if (i + maxParallel < pending.length) {
+      // Wait until batch items are no longer 'downloading'
+      await waitForBatchComplete(batch.map((b) => b.videoId));
+    }
+  }
+}
+
+/** Wait until none of the given videoIds are in 'downloading' status */
+async function waitForBatchComplete(videoIds: string[]): Promise<void> {
+  const maxWait = 600000; // 10 min timeout
+  const start = Date.now();
+  while (Date.now() - start < maxWait) {
+    const stillDownloading = videoIds.some((id) => {
+      const item = videoQueue.get(id);
+      return item?.status === 'downloading';
+    });
+    if (!stillDownloading) return;
+    await new Promise((r) => setTimeout(r, 1000));
   }
 }
 
