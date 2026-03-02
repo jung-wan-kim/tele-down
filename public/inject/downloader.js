@@ -3,7 +3,7 @@
   // src/inject/downloader.ts
   var currentSettings = {
     downloadFolder: "TeleDown",
-    parallelChunks: 4
+    parallelChunks: 2
   };
   document.addEventListener("tele_down_settings", ((e) => {
     currentSettings = { ...currentSettings, ...e.detail };
@@ -51,6 +51,35 @@
       })
     );
   }
+  var MAX_RETRIES = 5;
+  async function fetchWithRetry(url, init, label) {
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        const response = await fetch(url, init);
+        if (response.ok || response.status === 206) {
+          return response;
+        }
+        if (response.status >= 500 || response.status === 408) {
+          logger.info(`${label}: HTTP ${response.status}, retry ${attempt + 1}/${MAX_RETRIES}`);
+          await sleep(1e3 * (attempt + 1));
+          continue;
+        }
+        throw new Error(`${label}: HTTP ${response.status}`);
+      } catch (err) {
+        if (attempt < MAX_RETRIES - 1) {
+          const delay = 1e3 * (attempt + 1);
+          logger.info(`${label}: Network error, retry in ${delay}ms (${attempt + 1}/${MAX_RETRIES})`);
+          await sleep(delay);
+        } else {
+          throw err;
+        }
+      }
+    }
+    throw new Error(`${label}: All ${MAX_RETRIES} retries failed`);
+  }
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
   var CONTENT_RANGE_REGEX = /^bytes (\d+)-(\d+)\/(\d+)$/;
   async function downloadBlobUrl(url, videoId, page, downloadId) {
     const blobs = [];
@@ -59,13 +88,11 @@
     let extension = "mp4";
     let baseName = extractFileName(url, videoId, extension);
     const fetchNext = async () => {
-      const response = await fetch(url, {
-        method: "GET",
-        headers: { Range: `bytes=${offset}-` }
-      });
-      if (![200, 206].includes(response.status)) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      const response = await fetchWithRetry(
+        url,
+        { method: "GET", headers: { Range: `bytes=${offset}-` } },
+        `Blob seg@${offset}`
+      );
       const ct = response.headers.get("Content-Type")?.split(";")[0] || "";
       const ext = ct.split("/")[1];
       if (ext) {
@@ -82,8 +109,7 @@
       if (totalSize !== null && total !== totalSize) throw new Error("Total size mismatch");
       offset = rangeEnd + 1;
       totalSize = total;
-      const progress = offset / totalSize * 100;
-      dispatchProgress(videoId, progress, page, downloadId);
+      dispatchProgress(videoId, offset / totalSize * 100, page, downloadId);
       blobs.push(await response.blob());
       if (offset < totalSize) await fetchNext();
     };
@@ -92,8 +118,7 @@
     triggerDownload(finalBlob, baseName);
   }
   async function probeSegmentInfo(url) {
-    const response = await fetch(url, { headers: { Range: "bytes=0-" } });
-    if (!response.ok) throw new Error(`Probe failed: HTTP ${response.status}`);
+    const response = await fetchWithRetry(url, { headers: { Range: "bytes=0-" } }, "Probe");
     const contentSize = parseInt(response.headers.get("Content-Range")?.split("/")[1] || "0", 10);
     const segmentSize = parseInt(response.headers.get("Content-Length") || "0", 10);
     const contentType = response.headers.get("Content-Type") || "application/octet-stream";
@@ -108,66 +133,42 @@
       contentSize
     };
   }
-  var FetchRetryError = class extends Error {
-    constructor(message, segmentIndex, range) {
-      super(message);
-      this.segmentIndex = segmentIndex;
-      this.range = range;
-      this.name = "FetchRetryError";
-    }
-  };
-  function createSegmentFetchers(url, info, videoId, page, downloadId) {
-    return Array.from({ length: info.segmentCount }, (_, index) => {
-      const start = index * info.segmentSize;
-      const end = Math.min(start + info.segmentSize - 1, info.contentSize - 1);
-      return async () => {
-        const response = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
-        if (response.status === 408) {
-          throw new FetchRetryError(`Timeout on segment ${index}`, index, `bytes=${start}-${end}`);
-        }
-        if (!response.ok && response.status !== 206) {
-          throw new Error(`Segment ${index}: HTTP ${response.status}`);
-        }
-        const progress = end / info.contentSize * 100;
-        dispatchProgress(videoId, progress, page, downloadId);
-        return response.arrayBuffer();
-      };
-    });
-  }
-  async function executeBatched(fetchers, batchSize) {
-    const results = [];
-    let offset = 0;
-    while (offset < fetchers.length) {
-      const batch = fetchers.slice(offset, offset + batchSize).map((fn) => fn());
-      try {
-        const batchResults = await Promise.all(batch);
-        results.push(...batchResults);
-        offset += batchSize;
-        if (offset < fetchers.length) {
-          await new Promise((r) => setTimeout(r, 300));
-        }
-      } catch (err) {
-        if (err instanceof FetchRetryError) {
-          offset = err.segmentIndex;
-          await new Promise((r) => setTimeout(r, 2e3));
-        } else {
-          throw err;
-        }
-      }
-    }
-    return results;
-  }
   async function downloadSegmented(url, videoId, page, downloadId) {
     const info = await probeSegmentInfo(url);
     const ext = info.contentType.split("/")[1] || "mp4";
     const fileName = extractFileName(url, videoId, ext);
+    const batchSize = Math.max(1, Math.min(currentSettings.parallelChunks || 2, 6));
     logger.info(
-      `Segmented download: ${info.segmentCount} segments, ${formatBytes(info.contentSize)}`,
+      `Download: ${info.segmentCount} segments, ${formatBytes(info.contentSize)}, batch=${batchSize}`,
       fileName
     );
-    const fetchers = createSegmentFetchers(url, info, videoId, page, downloadId);
-    const batchSize = currentSettings.parallelChunks || 4;
-    const segments = await executeBatched(fetchers, batchSize);
+    const segments = [];
+    let offset = 0;
+    while (offset < info.segmentCount) {
+      const batchEnd = Math.min(offset + batchSize, info.segmentCount);
+      const promises = [];
+      for (let i = offset; i < batchEnd; i++) {
+        const start = i * info.segmentSize;
+        const end = Math.min(start + info.segmentSize - 1, info.contentSize - 1);
+        promises.push(
+          fetchWithRetry(
+            url,
+            { headers: { Range: `bytes=${start}-${end}` } },
+            `Seg ${i}/${info.segmentCount}`
+          ).then((resp) => {
+            const progress = end / info.contentSize * 100;
+            dispatchProgress(videoId, progress, page, downloadId);
+            return resp.arrayBuffer();
+          })
+        );
+      }
+      const batchResults = await Promise.all(promises);
+      segments.push(...batchResults);
+      offset = batchEnd;
+      if (offset < info.segmentCount) {
+        await sleep(500);
+      }
+    }
     const finalBlob = new Blob(segments, { type: info.contentType });
     dispatchProgress(videoId, 100, page, downloadId);
     triggerDownload(finalBlob, fileName);

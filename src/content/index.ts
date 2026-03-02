@@ -243,15 +243,11 @@ async function startAllPendingDownloads(): Promise<void> {
   );
   if (pending.length === 0) return;
 
-  const parallel = settings.parallelDownloads || 3;
-
-  // Process in batches
-  for (let i = 0; i < pending.length; i += parallel) {
-    const batch = pending.slice(i, i + parallel);
-    batch.forEach((item) => requestDownload(item.videoUrl, item.videoId));
-    if (i + parallel < pending.length) {
-      await new Promise((r) => setTimeout(r, 1000));
-    }
+  // Download one video at a time to avoid overwhelming Telegram's Service Worker
+  for (const item of pending) {
+    requestDownload(item.videoUrl, item.videoId);
+    // Wait a bit before starting the next to stagger requests
+    await new Promise((r) => setTimeout(r, 2000));
   }
 }
 

@@ -5,9 +5,9 @@
  * Has access to page's fetch / cookies (for authenticated Telegram requests).
  *
  * Features:
- * - Range-based parallel chunk download
+ * - Range-based chunk download with retry
  * - Blob URL fallback (sequential)
- * - Download to configured subfolder (e.g. Downloads/TeleDown/)
+ * - Download to configured subfolder via chrome.downloads API
  * - Listens for settings from content script
  */
 
@@ -16,13 +16,13 @@
 // ============================================================
 
 interface InjectSettings {
-  downloadFolder: string;  // subfolder inside Downloads
+  downloadFolder: string;
   parallelChunks: number;
 }
 
 let currentSettings: InjectSettings = {
   downloadFolder: 'TeleDown',
-  parallelChunks: 4,
+  parallelChunks: 2,
 };
 
 document.addEventListener('tele_down_settings', ((e: CustomEvent<InjectSettings>) => {
@@ -74,22 +74,13 @@ const activeDownloads = new Set<string>();
 // URL Resolution
 // ============================================================
 
-/**
- * Resolve a relative Telegram stream/progressive URL to absolute.
- * Telegram Web uses relative URLs like "stream/{encoded}" which
- * are intercepted by its Service Worker under /k/ or /a/ path.
- * Using new URL() properly resolves relative to current page base.
- */
 function resolveVideoUrl(url: string): string {
   if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('blob:')) {
     return url;
   }
   try {
-    // new URL resolves relative to current page: e.g.
-    // "stream/..." + "https://web.telegram.org/k/#chat" → "https://web.telegram.org/k/stream/..."
     return new URL(url, window.location.href).href;
   } catch {
-    // Fallback: manual concatenation with pathname
     const base = window.location.origin + window.location.pathname;
     const prefix = url.startsWith('/') ? '' : '/';
     return `${base.replace(/\/$/, '')}${prefix}${url}`;
@@ -97,7 +88,7 @@ function resolveVideoUrl(url: string): string {
 }
 
 // ============================================================
-// File Name & Folder
+// File Name
 // ============================================================
 
 function extractFileName(url: string, videoId: string, extension: string): string {
@@ -112,22 +103,9 @@ function extractFileName(url: string, videoId: string, extension: string): strin
       const docPart = url.split('document').slice(1).join('');
       if (docPart) return `${docPart}.${extension}`;
     }
-  } catch {
-    // Fallback
-  }
+  } catch { /* fallback */ }
   if (videoId) return `${videoId}.${extension}`;
   return `${Math.random().toString(36).substring(2, 10)}.${extension}`;
-}
-
-/**
- * Prefix the file name with the configured download folder.
- * Setting anchor.download = "TeleDown/video.mp4" makes the browser
- * create Downloads/TeleDown/ automatically.
- */
-function withFolder(fileName: string): string {
-  const folder = currentSettings.downloadFolder?.trim();
-  if (!folder) return fileName;
-  return `${folder}/${fileName}`;
 }
 
 // ============================================================
@@ -141,6 +119,47 @@ function dispatchProgress(videoId: string, progress: number, page?: string, down
       detail: { video_id: videoId, progress: progress.toFixed(0), page, download_id: downloadId },
     }),
   );
+}
+
+// ============================================================
+// Retry helper
+// ============================================================
+
+const MAX_RETRIES = 5;
+
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  label: string,
+): Promise<Response> {
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url, init);
+      if (response.ok || response.status === 206) {
+        return response;
+      }
+      // Server error → retry
+      if (response.status >= 500 || response.status === 408) {
+        logger.info(`${label}: HTTP ${response.status}, retry ${attempt + 1}/${MAX_RETRIES}`);
+        await sleep(1000 * (attempt + 1));
+        continue;
+      }
+      throw new Error(`${label}: HTTP ${response.status}`);
+    } catch (err) {
+      if (attempt < MAX_RETRIES - 1) {
+        const delay = 1000 * (attempt + 1);
+        logger.info(`${label}: Network error, retry in ${delay}ms (${attempt + 1}/${MAX_RETRIES})`);
+        await sleep(delay);
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw new Error(`${label}: All ${MAX_RETRIES} retries failed`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ============================================================
@@ -162,14 +181,11 @@ async function downloadBlobUrl(
   let baseName = extractFileName(url, videoId, extension);
 
   const fetchNext = async (): Promise<void> => {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { Range: `bytes=${offset}-` },
-    });
-
-    if (![200, 206].includes(response.status)) {
-      throw new Error(`HTTP ${response.status}`);
-    }
+    const response = await fetchWithRetry(
+      url,
+      { method: 'GET', headers: { Range: `bytes=${offset}-` } },
+      `Blob seg@${offset}`,
+    );
 
     const ct = response.headers.get('Content-Type')?.split(';')[0] || '';
     const ext = ct.split('/')[1];
@@ -192,9 +208,7 @@ async function downloadBlobUrl(
     offset = rangeEnd + 1;
     totalSize = total;
 
-    const progress = (offset / totalSize) * 100;
-    dispatchProgress(videoId, progress, page, downloadId);
-
+    dispatchProgress(videoId, (offset / totalSize) * 100, page, downloadId);
     blobs.push(await response.blob());
 
     if (offset < totalSize) await fetchNext();
@@ -207,12 +221,11 @@ async function downloadBlobUrl(
 }
 
 // ============================================================
-// Segmented parallel download (primary)
+// Segmented download (primary) — sequential with retry
 // ============================================================
 
 async function probeSegmentInfo(url: string): Promise<SegmentInfo> {
-  const response = await fetch(url, { headers: { Range: 'bytes=0-' } });
-  if (!response.ok) throw new Error(`Probe failed: HTTP ${response.status}`);
+  const response = await fetchWithRetry(url, { headers: { Range: 'bytes=0-' } }, 'Probe');
 
   const contentSize = parseInt(response.headers.get('Content-Range')?.split('/')[1] || '0', 10);
   const segmentSize = parseInt(response.headers.get('Content-Length') || '0', 10);
@@ -231,77 +244,6 @@ async function probeSegmentInfo(url: string): Promise<SegmentInfo> {
   };
 }
 
-class FetchRetryError extends Error {
-  constructor(
-    message: string,
-    public readonly segmentIndex: number,
-    public readonly range: string,
-  ) {
-    super(message);
-    this.name = 'FetchRetryError';
-  }
-}
-
-function createSegmentFetchers(
-  url: string,
-  info: SegmentInfo,
-  videoId: string,
-  page?: string,
-  downloadId?: string,
-): Array<() => Promise<ArrayBuffer>> {
-  return Array.from({ length: info.segmentCount }, (_, index) => {
-    const start = index * info.segmentSize;
-    const end = Math.min(start + info.segmentSize - 1, info.contentSize - 1);
-
-    return async (): Promise<ArrayBuffer> => {
-      const response = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
-
-      if (response.status === 408) {
-        throw new FetchRetryError(`Timeout on segment ${index}`, index, `bytes=${start}-${end}`);
-      }
-      if (!response.ok && response.status !== 206) {
-        throw new Error(`Segment ${index}: HTTP ${response.status}`);
-      }
-
-      const progress = (end / info.contentSize) * 100;
-      dispatchProgress(videoId, progress, page, downloadId);
-
-      return response.arrayBuffer();
-    };
-  });
-}
-
-async function executeBatched(
-  fetchers: Array<() => Promise<ArrayBuffer>>,
-  batchSize: number,
-): Promise<ArrayBuffer[]> {
-  const results: ArrayBuffer[] = [];
-  let offset = 0;
-
-  while (offset < fetchers.length) {
-    const batch = fetchers.slice(offset, offset + batchSize).map((fn) => fn());
-    try {
-      const batchResults = await Promise.all(batch);
-      results.push(...batchResults);
-      offset += batchSize;
-
-      // Delay between batches to avoid overwhelming Telegram's Service Worker
-      if (offset < fetchers.length) {
-        await new Promise((r) => setTimeout(r, 300));
-      }
-    } catch (err) {
-      if (err instanceof FetchRetryError) {
-        offset = err.segmentIndex;
-        await new Promise((r) => setTimeout(r, 2000));
-      } else {
-        throw err;
-      }
-    }
-  }
-
-  return results;
-}
-
 async function downloadSegmented(
   url: string,
   videoId: string,
@@ -311,15 +253,46 @@ async function downloadSegmented(
   const info = await probeSegmentInfo(url);
   const ext = info.contentType.split('/')[1] || 'mp4';
   const fileName = extractFileName(url, videoId, ext);
+  const batchSize = Math.max(1, Math.min(currentSettings.parallelChunks || 2, 6));
 
   logger.info(
-    `Segmented download: ${info.segmentCount} segments, ${formatBytes(info.contentSize)}`,
+    `Download: ${info.segmentCount} segments, ${formatBytes(info.contentSize)}, batch=${batchSize}`,
     fileName,
   );
 
-  const fetchers = createSegmentFetchers(url, info, videoId, page, downloadId);
-  const batchSize = currentSettings.parallelChunks || 4;
-  const segments = await executeBatched(fetchers, batchSize);
+  const segments: ArrayBuffer[] = [];
+  let offset = 0;
+
+  while (offset < info.segmentCount) {
+    const batchEnd = Math.min(offset + batchSize, info.segmentCount);
+    const promises: Promise<ArrayBuffer>[] = [];
+
+    for (let i = offset; i < batchEnd; i++) {
+      const start = i * info.segmentSize;
+      const end = Math.min(start + info.segmentSize - 1, info.contentSize - 1);
+
+      promises.push(
+        fetchWithRetry(
+          url,
+          { headers: { Range: `bytes=${start}-${end}` } },
+          `Seg ${i}/${info.segmentCount}`,
+        ).then((resp) => {
+          const progress = (end / info.contentSize) * 100;
+          dispatchProgress(videoId, progress, page, downloadId);
+          return resp.arrayBuffer();
+        }),
+      );
+    }
+
+    const batchResults = await Promise.all(promises);
+    segments.push(...batchResults);
+    offset = batchEnd;
+
+    // Delay between batches — give Telegram's SW breathing room
+    if (offset < info.segmentCount) {
+      await sleep(500);
+    }
+  }
 
   const finalBlob = new Blob(segments, { type: info.contentType });
   dispatchProgress(videoId, 100, page, downloadId);
@@ -333,8 +306,6 @@ async function downloadSegmented(
 function triggerDownload(blob: Blob, fileName: string): void {
   const blobUrl = URL.createObjectURL(blob);
 
-  // Dispatch to content script → background → chrome.downloads.download()
-  // This properly saves to the configured subfolder (e.g. Downloads/TeleDown/)
   document.dispatchEvent(
     new CustomEvent('tele_down_save', {
       detail: {
@@ -346,8 +317,6 @@ function triggerDownload(blob: Blob, fileName: string): void {
   );
 
   logger.info(`Download dispatched: ${currentSettings.downloadFolder}/${fileName} (${formatBytes(blob.size)})`);
-
-  // Revoke blob URL after a delay (give chrome.downloads time to start)
   setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
 }
 
@@ -370,14 +339,12 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
   const { video_url, video_id, page, download_id } = src;
   if (!video_url) return;
 
-  // Prevent duplicate downloads for the same video
   if (activeDownloads.has(video_id)) {
     logger.info(`Skipping duplicate download: ${video_id}`);
     return;
   }
   activeDownloads.add(video_id);
 
-  // Resolve relative URLs to absolute
   const resolvedUrl = resolveVideoUrl(video_url);
 
   try {
