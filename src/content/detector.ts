@@ -371,14 +371,47 @@ export function tryGetVideoUrl(container: HTMLElement): string | null {
 }
 
 /**
+ * Simulate a real mouse click by dispatching the full pointer + mouse event
+ * sequence. A plain el.click() only fires 'click', but Telegram Web K relies
+ * on pointerdown / mousedown events for its UI handlers.
+ */
+function simulateClick(el: HTMLElement): void {
+  const rect = el.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+
+  const common: MouseEventInit = {
+    bubbles: true,
+    cancelable: true,
+    view: window,
+    clientX: x,
+    clientY: y,
+    button: 0,
+  };
+
+  el.dispatchEvent(new PointerEvent('pointerdown', { ...common, pointerId: 1, pointerType: 'mouse', buttons: 1 }));
+  el.dispatchEvent(new MouseEvent('mousedown', { ...common, buttons: 1 }));
+  el.dispatchEvent(new PointerEvent('pointerup', { ...common, pointerId: 1, pointerType: 'mouse', buttons: 0 }));
+  el.dispatchEvent(new MouseEvent('mouseup', { ...common, buttons: 0 }));
+  el.dispatchEvent(new MouseEvent('click', { ...common, buttons: 0 }));
+}
+
+/** Close the media viewer overlay if open */
+function closeMediaViewer(): void {
+  const closeBtn =
+    document.querySelector<HTMLElement>('.media-viewer-close') ||
+    document.querySelector<HTMLElement>('.btn-icon.media-viewer-close');
+  if (closeBtn) {
+    simulateClick(closeBtn);
+  }
+}
+
+/**
  * Trigger Telegram to load a video's stream URL by simulating user interaction.
  *
  * Telegram Web K does NOT set video.src on scroll alone — the user must click
- * the video / play button. We:
- * 1. Scroll into view
- * 2. Click the video container (triggers Telegram's media player)
- * 3. Poll for video.src to appear
- * 4. Pause playback once we have the URL
+ * the video container. We simulate a full pointer+mouse event sequence on the
+ * media container (which opens the media viewer), then poll for the stream URL.
  */
 export async function triggerVideoLoad(container: HTMLElement): Promise<string | null> {
   const bubble = container.closest<HTMLElement>('.bubble') ||
@@ -389,74 +422,78 @@ export async function triggerVideoLoad(container: HTMLElement): Promise<string |
   bubble.scrollIntoView({ behavior: 'instant', block: 'center' });
   await sleep(300);
 
-  // Find clickable target: play button or video/media container
+  // Prefer .media-container (opens media viewer in Web K) over the play button.
+  // The play button only handles inline play and may not trigger the viewer.
   const clickTarget =
-    bubble.querySelector<HTMLElement>('.btn-circle.video-play') ||
-    bubble.querySelector<HTMLElement>('.media-video') ||
     bubble.querySelector<HTMLElement>('.media-container') ||
+    bubble.querySelector<HTMLElement>('.media-video') ||
+    bubble.querySelector<HTMLElement>('.btn-circle.video-play') ||
     bubble.querySelector<HTMLElement>('video') ||
     container;
 
   if (clickTarget) {
-    console.log(`[TeleDown] Clicking to trigger load: ${clickTarget.tagName}.${clickTarget.className.split(' ')[0]}`);
-    clickTarget.click();
+    console.log(`[TeleDown] simulateClick: ${clickTarget.tagName}.${clickTarget.className?.split(' ')[0] || '?'} at (${Math.round(clickTarget.getBoundingClientRect().left)},${Math.round(clickTarget.getBoundingClientRect().top)})`);
+    simulateClick(clickTarget);
   }
 
   // Poll for video src to appear (Telegram loads asynchronously via SW)
-  const maxWait = 5000;
-  const pollInterval = 200;
+  const maxWait = 8000;
+  const pollInterval = 300;
   const start = Date.now();
+  let diagnosticLogged = false;
 
   while (Date.now() - start < maxWait) {
     await sleep(pollInterval);
 
+    // Check 1: inline video in the bubble
     const url = tryGetVideoUrl(container);
     if (url) {
-      // Pause the video — we only needed the URL
       const video = container.querySelector<HTMLVideoElement>('video') ||
         bubble.querySelector<HTMLVideoElement>('video');
-      if (video) {
-        video.pause();
-      }
-
-      // Close media viewer if it opened (Web K opens overlay on click)
-      const closeBtn = document.querySelector<HTMLElement>('.media-viewer-close') ||
-        document.querySelector<HTMLElement>('.btn-icon.media-viewer-close');
-      if (closeBtn) {
-        closeBtn.click();
-        await sleep(200);
-      }
-
+      if (video) video.pause();
+      closeMediaViewer();
+      await sleep(200);
       return url;
     }
 
-    // Also check if a media viewer opened with the video
+    // Check 2: media viewer overlay video
     const viewerVideo = document.querySelector<HTMLVideoElement>(
-      '.media-viewer-movers video, .media-viewer-aspecter video'
+      '.media-viewer-movers video, .media-viewer-aspecter video, .media-viewer-whole video'
     );
     if (viewerVideo) {
       const viewerUrl = getVideoUrlFromElement(viewerVideo);
       if (viewerUrl) {
         viewerVideo.pause();
-        // Close the viewer
-        const closeBtn = document.querySelector<HTMLElement>('.media-viewer-close') ||
-          document.querySelector<HTMLElement>('.btn-icon.media-viewer-close');
-        if (closeBtn) {
-          closeBtn.click();
-          await sleep(200);
-        }
+        closeMediaViewer();
+        await sleep(200);
         return viewerUrl;
       }
     }
+
+    // Check 3: any video with stream URL anywhere in document
+    const streamVideo = document.querySelector<HTMLVideoElement>('video[src*="stream/"]');
+    if (streamVideo) {
+      const streamUrl = streamVideo.src;
+      if (isValidVideoUrl(streamUrl)) {
+        streamVideo.pause();
+        closeMediaViewer();
+        await sleep(200);
+        return streamUrl;
+      }
+    }
+
+    // Diagnostic: log state after 2 seconds
+    if (!diagnosticLogged && Date.now() - start > 2000) {
+      diagnosticLogged = true;
+      const viewerOpen = !!document.querySelector('.media-viewer-whole');
+      const allVideos = document.querySelectorAll('video');
+      const videoSrcs = Array.from(allVideos).map(v => v.src || v.currentSrc || '(none)').join(', ');
+      console.log(`[TeleDown] After 2s: viewerOpen=${viewerOpen}, videoCount=${allVideos.length}, srcs=[${videoSrcs}]`);
+    }
   }
 
-  // Close any viewer that might have opened without giving us a URL
-  const closeBtn = document.querySelector<HTMLElement>('.media-viewer-close') ||
-    document.querySelector<HTMLElement>('.btn-icon.media-viewer-close');
-  if (closeBtn) {
-    closeBtn.click();
-  }
-
+  // Close any viewer that might have opened
+  closeMediaViewer();
   return null;
 }
 
