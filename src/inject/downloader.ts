@@ -298,8 +298,13 @@ async function downloadSegmented(
   const targetQueue = Math.max(1, Math.min(currentSettings.downloadQueue || 50, 200));
   const segmentSize = alignChunkSize(contentSize, targetQueue);
   const numSegments = Math.ceil(contentSize / segmentSize);
-  // Hard cap concurrent requests to avoid LIMIT_INVALID flood
-  const maxConcurrent = Math.max(1, Math.min(currentSettings.parallelChunks || 3, 5));
+  // Reduce concurrent segments when multiple files are downloading simultaneously
+  // Total connections = activeDownloads × maxConcurrent, keep under ~10
+  const activeCount = activeDownloads.size;
+  const perFileConcurrent = activeCount > 1
+    ? Math.max(1, Math.floor(10 / activeCount))
+    : Math.min(currentSettings.parallelChunks || 3, 5);
+  const maxConcurrent = Math.max(1, Math.min(perFileConcurrent, 5));
 
   const ext = contentType.split('/')[1] || 'mp4';
   const fileName = buildFileName(url, videoId, ext, chatName);
