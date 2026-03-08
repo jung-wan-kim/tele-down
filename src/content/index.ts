@@ -117,18 +117,24 @@ function computePanelState(): PanelState {
 
 function requestDownload(videoUrl: string, videoId: string): void {
   const item = videoQueue.get(videoId);
-  if (!item) return;
-  // Only allow downloading from 'pending' or 'error' (retry) status
-  if (item.status === 'downloading' || item.status === 'completed') return;
+  if (!item) {
+    console.warn(`[TeleDown] [${videoId}] requestDownload: not in queue`);
+    return;
+  }
+  if (item.status === 'downloading' || item.status === 'completed') {
+    console.log(`[TeleDown] [${videoId}] requestDownload: skip (${item.status})`);
+    return;
+  }
 
   const downloadId = generateDownloadId();
   item.status = 'downloading';
   item.progress = 0;
   videoQueue.set(videoId, item);
 
+  console.log(`[TeleDown] [${videoId}] → dispatching to inject script, url=${videoUrl.substring(0, 80)}...`);
+
   updateControlPanel(computePanelState());
 
-  // Notify background
   chrome.runtime.sendMessage({
     action: 'downloadStarted',
     data: { videoId, downloadId, progress: 0, status: 'downloading', fileName: videoId },
@@ -150,78 +156,89 @@ function requestDownload(videoUrl: string, videoId: string): void {
   );
 }
 
-/** Resolve URLs for pending videos that don't have one yet */
-async function resolveVideoUrls(): Promise<void> {
-  const needsUrl = Array.from(videoQueue.values()).filter(
-    (v) => v.status === 'pending' && !v.videoUrl && v.containerElement,
-  );
+/** Try to resolve a single video's URL with retries and scrolling */
+async function resolveOneVideoUrl(item: QueueItem): Promise<string | null> {
+  if (!item.containerElement) return null;
 
-  if (needsUrl.length === 0) return;
+  // Attempt 1: check if URL appeared since detection
+  let url = tryGetVideoUrl(item.containerElement);
+  if (url) return url;
 
-  console.log(`[TeleDown] Resolving URLs for ${needsUrl.length} video(s)...`);
-
-  for (const item of needsUrl) {
-    if (!item.containerElement) continue;
-
-    // First try without scrolling (maybe it loaded since detection)
-    let url = tryGetVideoUrl(item.containerElement);
-    if (!url) {
-      // Scroll into view to trigger Telegram's lazy loading
-      url = await triggerVideoLoad(item.containerElement);
-    }
-
-    if (url) {
-      item.videoUrl = url;
-      console.log(`[TeleDown] Resolved URL for ${item.videoId}`);
-    }
+  // Attempt 2-4: scroll into view and wait progressively longer
+  for (let attempt = 0; attempt < 3; attempt++) {
+    url = await triggerVideoLoad(item.containerElement);
+    if (url) return url;
+    await sleep(300); // extra wait between retries
   }
+
+  return null;
 }
 
 /** Download all pending videos using a sliding-window concurrency model.
- *  Instead of batch-then-wait, starts a new download whenever a slot frees up. */
+ *  Resolves URLs on-demand for each video before downloading. */
 async function startAllPendingDownloads(): Promise<void> {
-  // First, resolve URLs for videos that don't have one yet
-  await resolveVideoUrls();
-
+  // Include ALL pending videos, even without URLs (will resolve on-demand)
   const pending = Array.from(videoQueue.values()).filter(
-    (v) => v.status === 'pending' && v.videoUrl,
+    (v) => v.status === 'pending',
   );
-  if (pending.length === 0) return;
+  if (pending.length === 0) {
+    console.log('[TeleDown] No pending videos to download');
+    return;
+  }
 
+  const withUrl = pending.filter((v) => v.videoUrl).length;
+  const withoutUrl = pending.length - withUrl;
   const maxParallel = Math.max(1, Math.min(settings.parallelDownloads || 2, 5));
-  console.log(`[TeleDown] Starting ${pending.length} downloads (${maxParallel} parallel)`);
+  console.log(`[TeleDown] Queue: ${pending.length} pending (${withUrl} with URL, ${withoutUrl} need resolve), parallel=${maxParallel}`);
 
-  // Sliding-window: maintain up to maxParallel concurrent downloads
   let nextIdx = 0;
   let activeCount = 0;
+  let completedCount = 0;
+  let skippedCount = 0;
 
   return new Promise<void>((resolveAll) => {
     function onSlotFreed(): void {
       activeCount--;
-      // Start next item(s) to fill available slots
       fillSlots();
-      // All done?
       if (activeCount === 0 && nextIdx >= pending.length) {
+        console.log(`[TeleDown] All done: ${completedCount} started, ${skippedCount} skipped (no URL)`);
         resolveAll();
       }
     }
 
-    function fillSlots(): void {
+    async function fillSlots(): Promise<void> {
       while (activeCount < maxParallel && nextIdx < pending.length) {
         const item = pending[nextIdx++];
-        // Skip if no longer pending (may have been downloaded by user click)
-        if (item.status !== 'pending' || !item.videoUrl) {
+        if (item.status !== 'pending') {
+          console.log(`[TeleDown] [${item.videoId}] skip: status=${item.status}`);
           continue;
         }
+
+        // Resolve URL if needed
+        if (!item.videoUrl) {
+          console.log(`[TeleDown] [${item.videoId}] resolving URL...`);
+          const url = await resolveOneVideoUrl(item);
+          if (url) {
+            item.videoUrl = url;
+            console.log(`[TeleDown] [${item.videoId}] URL resolved`);
+          } else {
+            console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED, skipping`);
+            skippedCount++;
+            continue;
+          }
+        }
+
         activeCount++;
+        completedCount++;
+        console.log(`[TeleDown] [${item.videoId}] starting download (active=${activeCount}, remaining=${pending.length - nextIdx})`);
         startTrackedDownload(item.videoUrl, item.videoId, onSlotFreed);
       }
     }
 
     fillSlots();
 
-    // Safety: if nothing was started (all skipped), resolve immediately
-    if (activeCount === 0) resolveAll();
+    // Safety: if nothing was started, resolve immediately
+    if (activeCount === 0 && nextIdx >= pending.length) resolveAll();
   });
 }
 
@@ -234,16 +251,16 @@ function startTrackedDownload(
   const PER_VIDEO_TIMEOUT = 300000; // 5 min per video max
   let settled = false;
 
-  function settle(): void {
+  function settle(reason: string): void {
     if (settled) return;
     settled = true;
+    console.log(`[TeleDown] [${videoId}] slot freed: ${reason}`);
     onDone();
   }
 
-  // Timeout fallback: if no progress/error event comes, free the slot
+  // Timeout fallback
   const timer = setTimeout(() => {
     if (!settled) {
-      console.warn(`[TeleDown] Timeout for ${videoId}, freeing slot`);
       const item = videoQueue.get(videoId);
       if (item && item.status === 'downloading') {
         item.status = 'error';
@@ -251,7 +268,7 @@ function startTrackedDownload(
         updateButtonError(videoId);
         updateControlPanel(computePanelState());
       }
-      settle();
+      settle('timeout');
     }
   }, PER_VIDEO_TIMEOUT);
 
@@ -261,7 +278,7 @@ function startTrackedDownload(
     if (!item || item.status === 'completed' || item.status === 'error') {
       clearInterval(checkInterval);
       clearTimeout(timer);
-      settle();
+      settle(item?.status || 'removed');
     }
   }, 500);
 
@@ -604,10 +621,16 @@ window.addEventListener('message', (event) => {
     case 'tele_down_progress': {
       const videoId = msg.video_id as string;
       const progress = parseFloat(msg.progress);
-      if (!videoId || isNaN(progress)) return;
+      if (!videoId || isNaN(progress)) {
+        console.warn('[TeleDown] Bad progress msg:', msg);
+        return;
+      }
 
       const item = videoQueue.get(videoId);
-      if (!item) return;
+      if (!item) {
+        console.warn(`[TeleDown] Progress for unknown video: ${videoId}`);
+        return;
+      }
 
       item.progress = progress;
       updateButtonProgress(videoId, progress);
@@ -619,6 +642,7 @@ window.addEventListener('message', (event) => {
       }).catch(() => {});
 
       if (progress >= 99.9) {
+        console.log(`[TeleDown] [${videoId}] download COMPLETED`);
         item.status = 'completed';
         videoQueue.set(videoId, item);
         updateButtonCompleted(videoId);
@@ -636,6 +660,7 @@ window.addEventListener('message', (event) => {
     case 'tele_down_error': {
       const videoId = msg.video_id as string;
       if (!videoId) return;
+      console.error(`[TeleDown] [${videoId}] download ERROR: ${msg.error}`);
 
       const item = videoQueue.get(videoId);
       if (!item) return;

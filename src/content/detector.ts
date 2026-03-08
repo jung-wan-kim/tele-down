@@ -309,28 +309,14 @@ export async function triggerVideoLoad(container: HTMLElement): Promise<string |
     container.closest<HTMLElement>('[data-message-id]') ||
     container;
 
-  // Save current scroll position
-  const scrollContainer = document.querySelector('.bubbles-inner') ||
-    document.querySelector('.MessageList') ||
-    document.querySelector('.messages-container');
-
-  const savedScrollTop = scrollContainer?.scrollTop ?? 0;
-
   // Scroll the bubble into view to trigger Telegram's lazy loading
+  // Do NOT save/restore scroll — let Telegram's IntersectionObserver detect the element
   bubble.scrollIntoView({ behavior: 'instant', block: 'center' });
 
-  // Wait for Telegram to set the video src
-  await new Promise((r) => setTimeout(r, 600));
+  // Wait for Telegram to detect intersection + fetch + set video src
+  await new Promise((r) => setTimeout(r, 1500));
 
-  // Try to get the URL now
-  const url = tryGetVideoUrl(container);
-
-  // Restore scroll position
-  if (scrollContainer) {
-    scrollContainer.scrollTop = savedScrollTop;
-  }
-
-  return url;
+  return tryGetVideoUrl(container);
 }
 
 // ============================================================
