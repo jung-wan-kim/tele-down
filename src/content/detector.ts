@@ -394,34 +394,29 @@ function closeMediaViewer(): void {
 /**
  * Trigger Telegram to load a video's stream URL by simulating user interaction.
  *
- * Telegram Web K does NOT set video.src on scroll alone — the user must click
- * the video container. We simulate a full pointer+mouse event sequence on the
- * media container (which opens the media viewer), then poll for the stream URL.
+ * Approach (same as reference extension):
+ * 1. Close any existing media viewer
+ * 2. Click the media container → opens media viewer
+ * 3. Poll `.media-viewer-movers .media-viewer-aspecter video` for stream URL
+ * 4. Return URL (keep viewer open — user wants to see it)
  */
 export async function triggerVideoLoad(container: HTMLElement): Promise<string | null> {
   const bubble = container.closest<HTMLElement>('.bubble') ||
     container.closest<HTMLElement>('[data-message-id]') ||
     container;
 
-  // Close any existing media viewer first to prevent URL confusion
-  // (previous video's stream URL could be mistaken for this video's)
+  // Close any existing media viewer first
   const existingViewer = document.querySelector('.media-viewer-whole');
   if (existingViewer) {
     closeMediaViewer();
-    await sleep(500);
+    await sleep(600);
   }
-
-  // Remember any existing stream URLs so we only accept NEW ones
-  const existingStreamUrls = new Set<string>();
-  document.querySelectorAll<HTMLVideoElement>('video[src*="stream/"]').forEach((v) => {
-    if (v.src) existingStreamUrls.add(v.src);
-  });
 
   // Scroll into view
   bubble.scrollIntoView({ behavior: 'instant', block: 'center' });
   await sleep(300);
 
-  // Prefer .media-container (opens media viewer in Web K) over the play button.
+  // Click the media container to open media viewer (same selector priority as reference extension)
   const clickTarget =
     bubble.querySelector<HTMLElement>('.media-container') ||
     bubble.querySelector<HTMLElement>('.media-video') ||
@@ -434,61 +429,49 @@ export async function triggerVideoLoad(container: HTMLElement): Promise<string |
     simulateClick(clickTarget);
   }
 
-  // Poll for video src to appear (Telegram loads asynchronously via SW)
+  // Poll for stream URL in media viewer (reference extension uses same selector)
   const maxWait = 8000;
   const pollInterval = 300;
   const start = Date.now();
-  let diagnosticLogged = false;
 
   while (Date.now() - start < maxWait) {
     await sleep(pollInterval);
 
-    // Check 1: media viewer overlay video (primary — this has the stream URL)
+    // Primary: exact selector from reference extension
     const viewerVideo = document.querySelector<HTMLVideoElement>(
-      '.media-viewer-movers video, .media-viewer-aspecter video, .media-viewer-whole video'
+      '.media-viewer-movers .media-viewer-aspecter video'
     );
     if (viewerVideo) {
-      const viewerUrl = getVideoUrlFromElement(viewerVideo);
-      if (viewerUrl && !existingStreamUrls.has(viewerUrl)) {
-        console.log(`[TeleDown] Got NEW stream URL from media viewer`);
-        return viewerUrl;
+      const src = viewerVideo.getAttribute('src') || viewerVideo.src;
+      if (src && src.includes('stream/')) {
+        console.log(`[TeleDown] Got stream URL from media viewer`);
+        return src;
       }
     }
 
-    // Check 2: any NEW video with stream URL in document
-    const streamVideos = document.querySelectorAll<HTMLVideoElement>('video[src*="stream/"]');
-    for (const sv of streamVideos) {
-      if (sv.src && isValidVideoUrl(sv.src) && !existingStreamUrls.has(sv.src)) {
-        console.log(`[TeleDown] Got NEW stream URL from document`);
-        return sv.src;
+    // Fallback: any video in the media viewer with stream URL
+    const viewerVideos = document.querySelectorAll<HTMLVideoElement>('.media-viewer-whole video');
+    for (const v of viewerVideos) {
+      const src = v.getAttribute('src') || v.src;
+      if (src && src.includes('stream/')) {
+        console.log(`[TeleDown] Got stream URL from viewer (fallback)`);
+        return src;
       }
     }
 
-    // Check 3: inline video in the bubble (fallback)
-    const url = tryGetVideoUrl(container);
-    if (url && !existingStreamUrls.has(url)) {
-      return url;
-    }
-
-    // Diagnostic: log state after 2 seconds
-    if (!diagnosticLogged && Date.now() - start > 2000) {
-      diagnosticLogged = true;
+    // Log diagnostic after 3 seconds
+    if (Date.now() - start > 3000 && Date.now() - start < 3500) {
       const viewerOpen = !!document.querySelector('.media-viewer-whole');
-      const allVideos = document.querySelectorAll('video');
-      const videoSrcs = Array.from(allVideos).map(v => v.src || v.currentSrc || '(none)').join(', ');
-      console.log(`[TeleDown] After 2s: viewerOpen=${viewerOpen}, videos=${allVideos.length}, srcs=[${videoSrcs}], existing=[${[...existingStreamUrls].join(', ')}]`);
+      const videos = document.querySelectorAll('.media-viewer-whole video');
+      const srcs = Array.from(videos).map(v => (v as HTMLVideoElement).src || '(none)');
+      console.log(`[TeleDown] Waiting for stream URL: viewerOpen=${viewerOpen}, viewerVideos=${videos.length}, srcs=${JSON.stringify(srcs)}`);
     }
   }
 
   // Timeout: close viewer since we couldn't get URL
+  console.warn(`[TeleDown] triggerVideoLoad timeout after ${maxWait}ms`);
   closeMediaViewer();
   return null;
-}
-
-/** Extract URL from a video element (exported for use in triggerVideoLoad) */
-function getVideoUrlFromElement(video: HTMLVideoElement): string | null {
-  const url = getVideoUrl(video);
-  return isValidVideoUrl(url) ? url : null;
 }
 
 // ============================================================
@@ -553,6 +536,9 @@ export function startWatching(callback: VideoCallback): void {
       if (mutation.type === 'childList') {
         return Array.from(mutation.addedNodes).some((node) => {
           if (!(node instanceof HTMLElement)) return false;
+
+          if (node.tagName === 'VIDEO') return true;
+          if (node.querySelector?.('video')) return true;
 
           // Bubble with any video indicators (Web K)
           if (node.classList?.contains('bubble')) {
