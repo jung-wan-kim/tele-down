@@ -332,13 +332,7 @@ export function setDownloadHandler(handler: DownloadHandler): void {
   downloadHandler = handler;
 }
 
-/** Button state for restoring progress on re-created buttons */
-export interface ButtonState {
-  status?: string;
-  progress?: number;
-}
-
-export function injectDownloadButton(video: DetectedVideo, state?: ButtonState): void {
+export function injectDownloadButton(video: DetectedVideo): void {
   injectStyles();
   const { containerElement, videoId } = video;
   if (containerElement.querySelector('.tele-down-btn')) return;
@@ -367,26 +361,11 @@ export function injectDownloadButton(video: DetectedVideo, state?: ButtonState):
     downloadHandler?.(videoId);
   });
 
-  // Restore button state if video is actively downloading/completed/errored
-  if (state?.status === 'downloading') {
-    btn.classList.add('downloading');
-    btn.innerHTML = createProgressRing(state.progress || 0);
-    btn.title = `다운로드 중: ${Math.round(state.progress || 0)}%`;
-  } else if (state?.status === 'completed') {
-    btn.classList.add('completed');
-    btn.innerHTML = ICON_CHECK;
-    btn.title = '다운로드 완료';
-  } else if (state?.status === 'error') {
-    btn.classList.add('error');
-    btn.innerHTML = ICON_ERROR;
-    btn.title = '다운로드 실패 (클릭하여 재시도)';
-  }
-
   mediaContainer.appendChild(btn);
 }
 
-export function injectDownloadButtons(videos: DetectedVideo[], stateMap?: Map<string, ButtonState>): void {
-  videos.forEach((v) => injectDownloadButton(v, stateMap?.get(v.videoId)));
+export function injectDownloadButtons(videos: DetectedVideo[]): void {
+  videos.forEach(injectDownloadButton);
 }
 
 export function updateButtonProgress(videoId: string, progress: number): void {

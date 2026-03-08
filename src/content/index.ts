@@ -21,7 +21,6 @@ import {
   updateControlPanel,
   setControlPanelCallbacks,
   type PanelState,
-  type ButtonState,
 } from './ui';
 import type { ExtensionSettings } from '../types/messages';
 import { DEFAULT_SETTINGS } from '../types/messages';
@@ -258,14 +257,7 @@ function onVideosDetected(videos: DetectedVideo[]): void {
     (v) => v.durationSeconds === undefined || v.durationSeconds >= MIN_DURATION_SECONDS,
   );
   if (longVideos.length > 0) {
-    // Pass current state so re-created buttons show correct progress/status
-    const stateMap = new Map<string, ButtonState>();
-    for (const item of videoQueue.values()) {
-      if (item.status !== 'pending') {
-        stateMap.set(item.videoId, { status: item.status, progress: item.progress });
-      }
-    }
-    injectDownloadButtons(longVideos, stateMap);
+    injectDownloadButtons(longVideos);
   }
 
   showControlPanel(computePanelState());
@@ -352,6 +344,12 @@ window.addEventListener('message', (event) => {
       const item = videoQueue.get(videoId);
       if (!item) return;
 
+      // Only process progress for items that are actually downloading
+      if (item.status !== 'downloading') {
+        console.log(`[TeleDown] [${videoId}] ignoring progress (status=${item.status}, not downloading)`);
+        return;
+      }
+
       item.progress = progress;
       updateButtonProgress(videoId, progress);
       updateControlPanel(computePanelState());
@@ -381,7 +379,7 @@ window.addEventListener('message', (event) => {
       console.error(`[TeleDown] [${videoId}] download ERROR: ${msg.error}`);
 
       const item = videoQueue.get(videoId);
-      if (!item) return;
+      if (!item || item.status !== 'downloading') return;
 
       item.status = 'error';
       updateButtonError(videoId);
