@@ -14,6 +14,7 @@ import { startWatching, clearSeenVideos, tryGetVideoUrl, triggerVideoLoad, getCh
 import {
   injectDownloadButtons,
   setDownloadHandler,
+  resetButtonToDefault,
   updateButtonProgress,
   updateButtonCompleted,
   updateButtonError,
@@ -220,6 +221,33 @@ function injectDownloaderScript(): void {
 
 const MIN_DURATION_SECONDS = 60;
 
+/**
+ * Sync ALL button states with queue — prevents phantom "downloading" display.
+ * Runs every scan cycle (3s) to catch any stale/incorrect button states.
+ */
+function syncButtonStates(): void {
+  document.querySelectorAll<HTMLElement>('.tele-down-btn[data-video-id]').forEach((btn) => {
+    const videoId = btn.dataset.videoId!;
+    const item = videoQueue.get(videoId);
+
+    const hasDownloading = btn.classList.contains('downloading');
+    const hasCompleted = btn.classList.contains('completed');
+    const hasError = btn.classList.contains('error');
+    const hasAnyState = hasDownloading || hasCompleted || hasError;
+
+    // Not in queue → must be default
+    if (!item) {
+      if (hasAnyState) resetButtonToDefault(videoId);
+      return;
+    }
+
+    // Pending → must show default (no progress, not completed, not error)
+    if (item.status === 'pending' && hasAnyState) {
+      resetButtonToDefault(videoId);
+    }
+  });
+}
+
 function onVideosDetected(videos: DetectedVideo[]): void {
   let newCount = 0;
 
@@ -262,6 +290,9 @@ function onVideosDetected(videos: DetectedVideo[]): void {
   if (longVideos.length > 0) {
     injectDownloadButtons(longVideos);
   }
+
+  // Reconcile: ensure NO button shows wrong state
+  syncButtonStates();
 
   showControlPanel(computePanelState());
 }

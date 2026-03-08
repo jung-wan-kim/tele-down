@@ -335,7 +335,6 @@ export function setDownloadHandler(handler: DownloadHandler): void {
 export function injectDownloadButton(video: DetectedVideo): void {
   injectStyles();
   const { containerElement, videoId } = video;
-  if (containerElement.querySelector('.tele-down-btn')) return;
 
   const mediaContainer =
     containerElement.querySelector<HTMLElement>('.media-container') ||
@@ -343,6 +342,15 @@ export function injectDownloadButton(video: DetectedVideo): void {
     containerElement.querySelector<HTMLElement>('.document-container') ||
     containerElement.querySelector<HTMLElement>('.media-viewer-aspecter') ||
     containerElement;
+
+  // Check for existing button
+  const existingBtn = mediaContainer.querySelector<HTMLElement>('.tele-down-btn');
+  if (existingBtn) {
+    // Same video → keep existing button
+    if (existingBtn.dataset.videoId === videoId) return;
+    // Different video (Telegram reused container) → remove stale button
+    existingBtn.remove();
+  }
 
   if (window.getComputedStyle(mediaContainer).position === 'static') {
     mediaContainer.style.position = 'relative';
@@ -366,6 +374,15 @@ export function injectDownloadButton(video: DetectedVideo): void {
 
 export function injectDownloadButtons(videos: DetectedVideo[]): void {
   videos.forEach(injectDownloadButton);
+}
+
+/** Reset a button to default (pending) state */
+export function resetButtonToDefault(videoId: string): void {
+  const btn = document.querySelector<HTMLElement>(`.tele-down-btn[data-video-id="${videoId}"]`);
+  if (!btn) return;
+  btn.classList.remove('downloading', 'completed', 'error');
+  btn.innerHTML = ICON_DOWNLOAD;
+  btn.title = '동영상 다운로드';
 }
 
 export function updateButtonProgress(videoId: string, progress: number): void {
