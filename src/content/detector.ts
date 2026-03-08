@@ -503,6 +503,27 @@ function getVideoUrlFromElement(video: HTMLVideoElement): string | null {
   return isValidVideoUrl(url) ? url : null;
 }
 
+// ============================================================
+// File ID Extraction from Telegram stream URLs
+// ============================================================
+
+/**
+ * Extract the unique document file ID from a Telegram stream URL.
+ * Works for both relative (stream/...) and absolute (https://.../stream/...) URLs.
+ * Returns null for non-stream URLs (blob:, etc.)
+ */
+export function extractFileIdFromUrl(url: string): string | null {
+  try {
+    const streamIdx = url.indexOf('stream/');
+    if (streamIdx === -1) return null;
+    const encoded = url.substring(streamIdx + 7).split('?')[0];
+    const parsed = JSON.parse(decodeURIComponent(encoded));
+    return parsed?.location?.id ? String(parsed.location.id) : null;
+  } catch {
+    return null;
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }

@@ -11,7 +11,7 @@
  * 7. Chat navigation detection (URL change)
  */
 
-import { startWatching, clearSeenVideos, tryGetVideoUrl, triggerVideoLoad, scanForVideos, getChatName, type DetectedVideo } from './detector';
+import { startWatching, clearSeenVideos, tryGetVideoUrl, triggerVideoLoad, scanForVideos, getChatName, extractFileIdFromUrl, type DetectedVideo } from './detector';
 import {
   injectDownloadButtons,
   setDownloadHandler,
@@ -256,7 +256,9 @@ async function startAllPendingDownloads(): Promise<void> {
             resolved++;
             console.log(`[TeleDown] [${item.videoId}] URL resolved`);
           } else {
-            console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED, skipping`);
+            console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED, marking as error`);
+            item.status = 'error';
+            updateButtonError(item.videoId);
           }
 
           // Opportunistic: while scrolled here, check other pending items in DOM
@@ -283,17 +285,21 @@ async function startAllPendingDownloads(): Promise<void> {
       }
 
       // ── Phase 2: Download with sliding window concurrency ──
-      // Dedup: same stream URL = same file, download only first occurrence
-      const seenUrls = new Set<string>();
+      // Dedup by file ID (not URL string) — same file may have different URL formats
+      // (relative vs absolute, different query params)
+      const seenFileIds = new Set<string>();
       const readyToDownload: QueueItem[] = [];
       for (const item of Array.from(videoQueue.values())) {
         if (item.status !== 'pending' || !item.videoUrl) continue;
-        if (seenUrls.has(item.videoUrl)) {
-          item.status = 'completed';
-          console.log(`[TeleDown] [${item.videoId}] skipped (duplicate URL)`);
-          continue;
+        const fileId = extractFileIdFromUrl(item.videoUrl);
+        if (fileId) {
+          if (seenFileIds.has(fileId)) {
+            item.status = 'completed';
+            console.log(`[TeleDown] [${item.videoId}] skipped (duplicate fileId=${fileId})`);
+            continue;
+          }
+          seenFileIds.add(fileId);
         }
-        seenUrls.add(item.videoUrl);
         readyToDownload.push(item);
       }
       updateControlPanel(computePanelState());

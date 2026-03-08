@@ -421,6 +421,8 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
     return;
   }
 
+  // Reserve file ID BEFORE download starts to prevent parallel race condition
+  if (fileId) downloadedFileIds.add(fileId);
   activeDownloads.add(video_id);
 
   try {
@@ -430,8 +432,9 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
       await downloadSegmented(resolvedUrl, video_id, page, download_id, chat_name, timestamp);
     }
     completedDownloads.add(video_id);
-    if (fileId) downloadedFileIds.add(fileId);
   } catch (error) {
+    // Release file ID on failure so retry is possible
+    if (fileId) downloadedFileIds.delete(fileId);
     const msg = error instanceof Error ? error.message : String(error);
     logger.error(msg, video_id);
     window.postMessage({
