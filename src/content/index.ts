@@ -268,14 +268,19 @@ async function startAllPendingDownloads(): Promise<void> {
       );
 
       for (const item of allToResolve) {
-        processedIds.add(item.videoId);
-        if (item.videoUrl) continue;
+        if (item.videoUrl) {
+          processedIds.add(item.videoId);
+          continue;
+        }
         // Reset error status for retry
         if (item.status === 'error') {
           item.status = 'pending';
           console.log(`[TeleDown] [${item.videoId}] retrying (attempt ${(item.resolveAttempts || 0) + 1}/${MAX_RESOLVE_RETRIES})`);
         }
-        if (item.status !== 'pending') continue;
+        if (item.status !== 'pending') {
+          processedIds.add(item.videoId);
+          continue;
+        }
 
         console.log(`[TeleDown] [${item.videoId}] resolving URL...`);
         const url = await resolveOneVideoUrl(item);
@@ -283,6 +288,7 @@ async function startAllPendingDownloads(): Promise<void> {
           item.videoUrl = url;
           item.resolveAttempts = 0;
           totalResolved++;
+          processedIds.add(item.videoId); // Only mark processed on SUCCESS
           console.log(`[TeleDown] [${item.videoId}] URL resolved`);
         } else {
           const attempts = (item.resolveAttempts || 0) + 1;
@@ -290,10 +296,11 @@ async function startAllPendingDownloads(): Promise<void> {
           if (attempts >= MAX_RESOLVE_RETRIES) {
             console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED after ${attempts} attempts, marking as error`);
             item.status = 'error';
+            processedIds.add(item.videoId); // Exhausted retries — permanently done
             updateButtonError(item.videoId);
           } else {
-            console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED (attempt ${attempts}/${MAX_RESOLVE_RETRIES}), will retry`);
-            item.status = 'error'; // temporarily error, picked up by retryable filter next pass
+            console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED (attempt ${attempts}/${MAX_RESOLVE_RETRIES}), will retry next pass`);
+            item.status = 'error'; // temporarily error; NOT added to processedIds → retryable next pass
           }
         }
 
