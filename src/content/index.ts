@@ -346,40 +346,23 @@ async function autoScrollAndDownload(): Promise<void> {
 
     if (scanAborted) return;
 
-    // Step 2: Scroll UP step-by-step
+    // Step 2: Scroll UP step-by-step using deterministic target position.
+    // triggerVideoLoad opens/closes media viewer which disrupts scroll position,
+    // so we track our own targetPosition that decreases monotonically.
     const viewportHeight = scrollContainer.clientHeight;
     const scrollStep = Math.max(viewportHeight * 0.7, 200);
 
+    let targetPosition = startScrollTop;
     let lastScrollHeight = scrollContainer.scrollHeight;
-    let lastScrollTop = scrollContainer.scrollTop;
-    let stuckCount = 0;
 
     while (!scanAborted) {
-      const currentScrollTop = scrollContainer.scrollTop;
+      // Calculate next position (always moves UP)
+      targetPosition = Math.max(0, targetPosition - scrollStep);
 
-      // Update progress
-      if (startScrollTop > 0) {
-        const totalScrolledUp = startScrollTop - currentScrollTop;
-        scanProgress = Math.min(99, (totalScrolledUp / startScrollTop) * 100);
-      } else {
-        scanProgress = 99;
-      }
-      updateControlPanel(computePanelState());
+      // Force scroll to target (overrides any shift from media viewer)
+      scrollContainer.scrollTop = targetPosition;
 
-      // Check if we've reached the top
-      if (currentScrollTop <= 0) {
-        await sleep(1500);
-        const newScrollHeight = scrollContainer.scrollHeight;
-        if (newScrollHeight <= lastScrollHeight + 100) {
-          break; // No more history
-        }
-        lastScrollHeight = newScrollHeight;
-      }
-
-      // Scroll UP one step
-      scrollContainer.scrollTop = Math.max(0, currentScrollTop - scrollStep);
-
-      // Wait for Telegram to lazy-load + render
+      // Wait for Telegram to lazy-load + render at this position
       await sleep(1000);
 
       if (scanAborted) break;
@@ -389,21 +372,40 @@ async function autoScrollAndDownload(): Promise<void> {
 
       if (scanAborted) break;
 
-      // Stuck detection
-      if (Math.abs(scrollContainer.scrollTop - lastScrollTop) < 5 &&
-          scrollContainer.scrollHeight === lastScrollHeight) {
-        stuckCount++;
-        if (stuckCount >= 3) break;
-      } else {
-        stuckCount = 0;
+      // Restore scroll position after URL resolution (media viewer may have changed it)
+      if (Math.abs(scrollContainer.scrollTop - targetPosition) > 50) {
+        scrollContainer.scrollTop = targetPosition;
+        await sleep(300);
       }
 
-      lastScrollTop = scrollContainer.scrollTop;
+      // Update progress
+      if (startScrollTop > 0) {
+        scanProgress = Math.min(99, ((startScrollTop - targetPosition) / startScrollTop) * 100);
+      } else {
+        scanProgress = 99;
+      }
+      updateControlPanel(computePanelState());
+
+      // Top reached?
+      if (targetPosition <= 0) {
+        await sleep(1500);
+        const newScrollHeight = scrollContainer.scrollHeight;
+        if (newScrollHeight <= lastScrollHeight + 100) {
+          break; // No more history to load
+        }
+        // Telegram loaded older messages — scrollHeight grew
+        lastScrollHeight = newScrollHeight;
+        // Stay at top to process newly loaded content
+        continue;
+      }
+
       lastScrollHeight = scrollContainer.scrollHeight;
     }
 
     // Final pass at topmost position
     if (!scanAborted) {
+      scrollContainer.scrollTop = 0;
+      await sleep(1000);
       totalResolved += await scanAndResolveAtPosition();
     }
 
@@ -551,10 +553,15 @@ function onVideosDetected(videos: DetectedVideo[]): void {
         timestamp: video.timestamp,
       });
       newlyAdded++;
-    } else if (!existing.videoUrl && video.videoUrl) {
-      // URL became available (lazy-loaded) - update it
-      existing.videoUrl = video.videoUrl;
-      existing.containerElement = video.containerElement;
+    } else if (!existing.videoUrl) {
+      if (video.videoUrl) {
+        // URL became available (lazy-loaded) - update it
+        existing.videoUrl = video.videoUrl;
+      }
+      // Always update container reference when re-detected (fresh DOM element)
+      if (video.containerElement?.isConnected) {
+        existing.containerElement = video.containerElement;
+      }
     }
   }
 
