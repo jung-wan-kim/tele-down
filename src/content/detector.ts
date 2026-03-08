@@ -503,10 +503,13 @@ function sleep(ms: number): Promise<void> {
 // Main Scanner
 // ============================================================
 
-/** Scan the current page for all video containers (chat only — manual download mode) */
+/** Scan the current page for all video containers (chat + media viewer) */
 export function scanForVideos(): DetectedVideo[] {
   const platform = detectPlatform();
-  return scanVideoContainers(platform);
+  return [
+    ...scanVideoContainers(platform),
+    ...scanMediaViewer(),
+  ];
 }
 
 // ============================================================
@@ -548,6 +551,11 @@ export function startWatching(callback: VideoCallback): void {
           // Message with video (Web A)
           if (node.hasAttribute?.('data-message-id')) {
             if (node.querySelector('video, .video-time, .media-video')) return true;
+          }
+
+          // Media viewer opened (layer popup)
+          if (node.classList?.contains('media-viewer-whole') || node.querySelector?.('.media-viewer-whole')) {
+            return true;
           }
 
           return false;
