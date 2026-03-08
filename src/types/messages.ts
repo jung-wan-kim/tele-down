@@ -51,9 +51,9 @@ export interface ExtensionSettings {
 
 /** Default settings */
 export const DEFAULT_SETTINGS: ExtensionSettings = {
-  parallelChunks: 10,
-  parallelDownloads: 3,
-  downloadQueue: 500,
+  parallelChunks: 3,
+  parallelDownloads: 2,
+  downloadQueue: 50,
   autoRetry: true,
   maxRetries: 3,
   downloadFolder: 'TeleDown',

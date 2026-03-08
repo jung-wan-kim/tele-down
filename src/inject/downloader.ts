@@ -23,8 +23,8 @@ interface InjectSettings {
 
 let currentSettings: InjectSettings = {
   downloadFolder: 'TeleDown',
-  parallelChunks: 10,
-  downloadQueue: 500,
+  parallelChunks: 3,
+  downloadQueue: 50,
 };
 
 // Use window.postMessage (NOT CustomEvent) — CustomEvent.detail is null across Chrome world boundary
@@ -138,10 +138,11 @@ async function fetchWithRetry(
       if (response.ok || response.status === 206) {
         return response;
       }
-      // Server error → retry
-      if (response.status >= 500 || response.status === 408) {
-        logger.info(`${label}: HTTP ${response.status}, retry ${attempt + 1}/${MAX_RETRIES}`);
-        await sleep(1000 * (attempt + 1));
+      // Retryable errors: server errors, timeout, and 400 (LIMIT_INVALID from MTProto)
+      if (response.status >= 500 || response.status === 408 || response.status === 400) {
+        const delay = response.status === 400 ? 2000 * (attempt + 1) : 1000 * (attempt + 1);
+        logger.info(`${label}: HTTP ${response.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`);
+        await sleep(delay);
         continue;
       }
       throw new Error(`${label}: HTTP ${response.status}`);
@@ -233,14 +234,15 @@ async function downloadBlobUrl(
 
 const CHUNK_ALIGN = 4096; // MTProto minimum alignment
 const MAX_CHUNK = 1048576; // MTProto maximum (1MB)
+const MIN_CHUNK = 524288; // 512KB — sweet spot to reduce segment count
 
 /** Calculate MTProto-compatible chunk size for target segment count */
 function alignChunkSize(totalSize: number, targetSegments: number): number {
   let size = Math.floor(totalSize / Math.max(1, targetSegments));
   // Align down to 4096 boundary
   size = Math.floor(size / CHUNK_ALIGN) * CHUNK_ALIGN;
-  // Clamp: min 4KB, max 1MB
-  return Math.max(CHUNK_ALIGN, Math.min(size, MAX_CHUNK));
+  // Clamp: min 512KB, max 1MB — fewer segments = fewer MTProto calls
+  return Math.max(MIN_CHUNK, Math.min(size, MAX_CHUNK));
 }
 
 async function downloadSegmented(
@@ -257,10 +259,11 @@ async function downloadSegmented(
 
   if (!contentSize) throw new Error('Cannot determine content size');
 
-  const targetQueue = Math.max(1, currentSettings.downloadQueue || 500);
+  const targetQueue = Math.max(1, Math.min(currentSettings.downloadQueue || 50, 200));
   const segmentSize = alignChunkSize(contentSize, targetQueue);
   const numSegments = Math.ceil(contentSize / segmentSize);
-  const maxConcurrent = Math.max(1, currentSettings.parallelChunks || 10);
+  // Hard cap concurrent requests to avoid LIMIT_INVALID flood
+  const maxConcurrent = Math.max(1, Math.min(currentSettings.parallelChunks || 3, 5));
 
   const ext = contentType.split('/')[1] || 'mp4';
   const fileName = extractFileName(url, videoId, ext);
@@ -298,6 +301,11 @@ async function downloadSegmented(
         }),
       ),
     );
+
+    // Throttle between batches to avoid Telegram LIMIT_INVALID rate limiting
+    if (i + maxConcurrent < segments.length) {
+      await sleep(150);
+    }
   }
 
   const finalBlob = new Blob(buffers, { type: contentType });
