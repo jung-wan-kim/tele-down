@@ -326,7 +326,7 @@ function createProgressRing(progress: number): string {
 // Per-video Download Button
 // ============================================================
 
-export type DownloadHandler = (videoUrl: string, videoId: string) => void;
+export type DownloadHandler = (videoId: string) => void;
 let downloadHandler: DownloadHandler | null = null;
 export function setDownloadHandler(handler: DownloadHandler): void {
   downloadHandler = handler;
@@ -334,7 +334,7 @@ export function setDownloadHandler(handler: DownloadHandler): void {
 
 export function injectDownloadButton(video: DetectedVideo): void {
   injectStyles();
-  const { containerElement, videoId, videoUrl } = video;
+  const { containerElement, videoId } = video;
   if (containerElement.querySelector('.tele-down-btn')) return;
 
   const mediaContainer =
@@ -351,7 +351,6 @@ export function injectDownloadButton(video: DetectedVideo): void {
   const btn = document.createElement('button');
   btn.className = 'tele-down-btn';
   btn.dataset.videoId = videoId;
-  btn.dataset.videoUrl = videoUrl;
   btn.innerHTML = ICON_DOWNLOAD;
   btn.title = '동영상 다운로드';
 
@@ -359,7 +358,7 @@ export function injectDownloadButton(video: DetectedVideo): void {
     e.preventDefault();
     e.stopPropagation();
     if (btn.classList.contains('downloading') || btn.classList.contains('completed')) return;
-    downloadHandler?.(videoUrl, videoId);
+    downloadHandler?.(videoId);
   });
 
   mediaContainer.appendChild(btn);
@@ -415,33 +414,18 @@ export interface PanelState {
   downloading: number;
   completed: number;
   errored: number;
-  autoDownload: boolean;
   downloadFolder: string;
-  scanning?: boolean;
-  scanProgress?: number; // 0-100
 }
 
-type StartDownloadCallback = () => void;
-type AutoDownloadToggleCallback = (enabled: boolean) => void;
-type StopScanCallback = () => void;
 type ClearCallback = () => void;
 
 let panel: HTMLElement | null = null;
-let onStartDownload: StartDownloadCallback | null = null;
-let onAutoDownloadToggle: AutoDownloadToggleCallback | null = null;
-let onStopScan: StopScanCallback | null = null;
 let onClear: ClearCallback | null = null;
 
 export function setControlPanelCallbacks(
-  onStart: StartDownloadCallback,
-  onToggle: AutoDownloadToggleCallback,
-  onStop?: StopScanCallback,
-  onClearHistory?: ClearCallback,
+  onClearHistory: ClearCallback,
 ): void {
-  onStartDownload = onStart;
-  onAutoDownloadToggle = onToggle;
-  onStopScan = onStop ?? null;
-  onClear = onClearHistory ?? null;
+  onClear = onClearHistory;
 }
 
 export function showControlPanel(state: PanelState): void {
@@ -451,23 +435,6 @@ export function showControlPanel(state: PanelState): void {
     panel = document.createElement('div');
     panel.id = 'tele-down-panel';
     document.body.appendChild(panel);
-  }
-
-  const pendingCount = state.pending;
-  const isScanning = state.scanning ?? false;
-  const scanPct = state.scanProgress ?? 0;
-  const startDisabled = !isScanning && pendingCount === 0 && state.downloading === 0;
-
-  // Button text logic
-  let btnHtml: string;
-  if (isScanning) {
-    btnHtml = `<span class="tdp-spinner"></span> 스캔 중... (${state.totalDetected}개 감지)`;
-  } else if (pendingCount > 0) {
-    btnHtml = `<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg> 스캔 + 다운로드 (${pendingCount}개)`;
-  } else if (state.downloading > 0) {
-    btnHtml = '다운로드 중...';
-  } else {
-    btnHtml = `<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg> 스캔 + 다운로드`;
   }
 
   panel.innerHTML = `
@@ -480,19 +447,11 @@ export function showControlPanel(state: PanelState): void {
         <span class="tdp-stat-label">감지된 동영상</span>
         <span class="tdp-stat-value highlight">${state.totalDetected}개</span>
       </div>
-      ${isScanning ? `<div class="tdp-scan-bar"><div class="tdp-scan-bar-fill" style="width:${scanPct}%"></div></div>` : ''}
       <div class="tdp-progress-row">
         <span>대기 <b>${state.pending}</b></span>
         <span class="cnt-downloading">다운로드 중 <b>${state.downloading}</b></span>
         <span class="cnt-done">완료 <b>${state.completed}</b></span>
         ${state.errored > 0 ? `<span class="cnt-error">오류 <b>${state.errored}</b></span>` : ''}
-      </div>
-      <div class="tdp-toggle-row">
-        <span class="tdp-toggle-label">자동 다운로드</span>
-        <label class="tdp-toggle">
-          <input type="checkbox" id="tdp-auto-toggle" ${state.autoDownload ? 'checked' : ''}>
-          <span class="tdp-toggle-slider"></span>
-        </label>
       </div>
       <div class="tdp-folder-row">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="#6c6c80">
@@ -500,32 +459,14 @@ export function showControlPanel(state: PanelState): void {
         </svg>
         <span>Downloads/<b>${state.downloadFolder}</b>/</span>
       </div>
-      <button class="tdp-btn-start ${isScanning ? 'scanning' : ''}" id="tdp-start-btn" ${startDisabled || isScanning ? 'disabled' : ''}>
-        ${btnHtml}
-      </button>
-      ${isScanning ? '<button class="tdp-btn-stop" id="tdp-stop-btn">스캔 중지</button>' : ''}
-      ${!isScanning && state.totalDetected > 0 ? '<button class="tdp-btn-clear" id="tdp-clear-btn">기록 초기화</button>' : ''}
+      ${state.totalDetected > 0 ? '<button class="tdp-btn-clear" id="tdp-clear-btn">기록 초기화</button>' : ''}
     </div>
   `;
 
   panel.classList.remove('hidden');
 
-  // Event listeners
   panel.querySelector('#tdp-close')?.addEventListener('click', () => {
     panel?.classList.add('hidden');
-  });
-
-  panel.querySelector('#tdp-start-btn')?.addEventListener('click', () => {
-    if (!startDisabled && !isScanning) onStartDownload?.();
-  });
-
-  panel.querySelector('#tdp-stop-btn')?.addEventListener('click', () => {
-    onStopScan?.();
-  });
-
-  panel.querySelector('#tdp-auto-toggle')?.addEventListener('change', (e) => {
-    const checked = (e.target as HTMLInputElement).checked;
-    onAutoDownloadToggle?.(checked);
   });
 
   panel.querySelector('#tdp-clear-btn')?.addEventListener('click', () => {
