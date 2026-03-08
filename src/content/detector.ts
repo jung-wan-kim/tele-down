@@ -28,6 +28,8 @@ export interface DetectedVideo {
   fileName?: string;
   /** Source context */
   source?: string;
+  /** Video duration in seconds (parsed from .video-time element) */
+  durationSeconds?: number;
 }
 
 // ============================================================
@@ -119,6 +121,21 @@ export function clearSeenVideos(): void {
 }
 
 // ============================================================
+// Duration Parsing
+// ============================================================
+
+/** Parse "M:SS" or "H:MM:SS" text from .video-time into seconds */
+function parseVideoDuration(element: HTMLElement): number | undefined {
+  const timeEl = element.querySelector('.video-time');
+  if (!timeEl) return undefined;
+  const text = (timeEl.textContent || '').trim();
+  const parts = text.split(':').map(Number);
+  if (parts.some(isNaN) || parts.length < 2) return undefined;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return parts[0] * 60 + parts[1];
+}
+
+// ============================================================
 // Container-Based Video Detection (Phase 1)
 // ============================================================
 
@@ -161,6 +178,7 @@ function scanVideoContainers(platform: TelegramPlatform): DetectedVideo[] {
         videoUrl: url || '', // empty string = URL not yet available
         containerElement: container,
         source: 'chat',
+        durationSeconds: parseVideoDuration(bubble),
       });
     });
   }
@@ -190,6 +208,7 @@ function scanVideoContainers(platform: TelegramPlatform): DetectedVideo[] {
         videoUrl: url || '',
         containerElement: container,
         source: 'chat',
+        durationSeconds: parseVideoDuration(msg),
       });
     });
   }

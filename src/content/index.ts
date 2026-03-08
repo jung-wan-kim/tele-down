@@ -475,10 +475,17 @@ function injectDownloaderScript(): void {
 // Video Detection Callback
 // ============================================================
 
+const MIN_DURATION_SECONDS = 60;
+
 function onVideosDetected(videos: DetectedVideo[]): void {
   let newlyAdded = 0;
 
   for (const video of videos) {
+    // Skip videos shorter than 1 minute
+    if (video.durationSeconds !== undefined && video.durationSeconds < MIN_DURATION_SECONDS) {
+      continue;
+    }
+
     const existing = videoQueue.get(video.videoId);
     if (!existing) {
       videoQueue.set(video.videoId, {
