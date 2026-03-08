@@ -445,41 +445,33 @@ export async function triggerVideoLoad(container: HTMLElement): Promise<string |
   while (Date.now() - start < maxWait) {
     await sleep(pollInterval);
 
-    // Check 1: inline video in the bubble
-    const url = tryGetVideoUrl(container);
-    if (url) {
-      const video = container.querySelector<HTMLVideoElement>('video') ||
-        bubble.querySelector<HTMLVideoElement>('video');
-      if (video) video.pause();
-      closeMediaViewer();
-      await sleep(200);
-      return url;
-    }
-
-    // Check 2: media viewer overlay video
+    // Check 1: media viewer overlay video (primary — this has the stream URL)
     const viewerVideo = document.querySelector<HTMLVideoElement>(
       '.media-viewer-movers video, .media-viewer-aspecter video, .media-viewer-whole video'
     );
     if (viewerVideo) {
       const viewerUrl = getVideoUrlFromElement(viewerVideo);
       if (viewerUrl) {
-        viewerVideo.pause();
-        closeMediaViewer();
-        await sleep(200);
+        // Keep media viewer open — user can watch while downloading
+        console.log(`[TeleDown] Got stream URL from media viewer (keeping popup open)`);
         return viewerUrl;
       }
     }
 
-    // Check 3: any video with stream URL anywhere in document
+    // Check 2: any video with stream URL anywhere in document
     const streamVideo = document.querySelector<HTMLVideoElement>('video[src*="stream/"]');
     if (streamVideo) {
       const streamUrl = streamVideo.src;
       if (isValidVideoUrl(streamUrl)) {
-        streamVideo.pause();
-        closeMediaViewer();
-        await sleep(200);
+        console.log(`[TeleDown] Got stream URL from document`);
         return streamUrl;
       }
+    }
+
+    // Check 3: inline video in the bubble (fallback)
+    const url = tryGetVideoUrl(container);
+    if (url) {
+      return url;
     }
 
     // Diagnostic: log state after 2 seconds
@@ -492,7 +484,7 @@ export async function triggerVideoLoad(container: HTMLElement): Promise<string |
     }
   }
 
-  // Close any viewer that might have opened
+  // Timeout: close viewer since we couldn't get URL
   closeMediaViewer();
   return null;
 }
