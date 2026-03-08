@@ -520,24 +520,10 @@ function sleep(ms: number): Promise<void> {
 // Main Scanner
 // ============================================================
 
-/** Scan the current page for all video containers */
+/** Scan the current page for all video containers (chat only — manual download mode) */
 export function scanForVideos(): DetectedVideo[] {
   const platform = detectPlatform();
-  const allDetected: DetectedVideo[] = [];
-
-  // 1. Chat message video containers (primary - detects even without src)
-  allDetected.push(...scanVideoContainers(platform));
-
-  // 2. Media viewer
-  allDetected.push(...scanMediaViewer());
-
-  // 3. Stories viewer
-  allDetected.push(...scanStoriesViewer());
-
-  // Log only on first detection (avoid spam from periodic rescan)
-
-
-  return allDetected;
+  return scanVideoContainers(platform);
 }
 
 // ============================================================
@@ -567,12 +553,6 @@ export function startWatching(callback: VideoCallback): void {
       if (mutation.type === 'childList') {
         return Array.from(mutation.addedNodes).some((node) => {
           if (!(node instanceof HTMLElement)) return false;
-
-          if (node.tagName === 'VIDEO') return true;
-          if (node.querySelector?.('video')) return true;
-          if (node.classList?.contains('media-viewer-whole')) return true;
-          if (node.classList?.contains('MediaViewerSlide--active')) return true;
-          if (node.id === 'stories-viewer' || node.id === 'StoryViewer') return true;
 
           // Bubble with any video indicators (Web K)
           if (node.classList?.contains('bubble')) {

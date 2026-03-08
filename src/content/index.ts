@@ -113,7 +113,10 @@ function requestDownload(videoUrl: string, videoId: string): void {
   item.status = 'downloading';
   item.progress = 0;
 
-  console.log(`[TeleDown] [${videoId}] → dispatching to inject script, url=${videoUrl.substring(0, 80)}...`);
+  // Log all queue statuses for debugging
+  const statuses = Array.from(videoQueue.entries()).map(([id, i]) => `${id}:${i.status}`).join(', ');
+  console.log(`[TeleDown] [${videoId}] → requestDownload, url=${videoUrl.substring(0, 80)}...`);
+  console.log(`[TeleDown] Queue: ${statuses}`);
 
   updateControlPanel(computePanelState());
 
