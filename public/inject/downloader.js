@@ -3,8 +3,8 @@
   // src/inject/downloader.ts
   var currentSettings = {
     downloadFolder: "TeleDown",
-    parallelChunks: 10,
-    downloadQueue: 500
+    parallelChunks: 3,
+    downloadQueue: 50
   };
   window.addEventListener("message", (e) => {
     if (e.source !== window || e.data?.type !== "tele_down_settings") return;
@@ -19,6 +19,18 @@
     error: (msg, ctx) => console.error(`[TeleDown] ${ctx ? `[${ctx}] ` : ""}${msg}`)
   };
   var activeDownloads = /* @__PURE__ */ new Set();
+  var completedDownloads = /* @__PURE__ */ new Set();
+  var downloadedFileIds = /* @__PURE__ */ new Set();
+  function extractFileId(url) {
+    try {
+      if (!url.includes("stream/")) return null;
+      const encoded = url.substring(url.indexOf("stream/") + 7).split("?")[0];
+      const parsed = JSON.parse(decodeURIComponent(encoded));
+      return parsed?.location?.id ? String(parsed.location.id) : null;
+    } catch {
+      return null;
+    }
+  }
   function resolveVideoUrl(url) {
     if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("blob:")) {
       return url;
@@ -31,30 +43,40 @@
       return `${base.replace(/\/$/, "")}${prefix}${url}`;
     }
   }
-  function extractFileName(url, videoId, extension) {
+  function buildFileName(url, videoId, extension, chatName, timestamp) {
+    let fileId = videoId;
     try {
       if (url.includes("stream/")) {
         const encodedPart = url.substring(url.indexOf("stream/") + 7).split("?")[0];
         const parsed = JSON.parse(decodeURIComponent(encodedPart));
-        if (parsed?.fileName) return parsed.fileName;
-        if (parsed?.location?.id) return `${parsed.location.id}.${extension}`;
-      }
-      if (url.includes("progressive/")) {
-        const docPart = url.split("document").slice(1).join("");
-        if (docPart) return `${docPart}.${extension}`;
+        if (parsed?.location?.id) fileId = String(parsed.location.id);
+        if (parsed?.fileName) {
+          const originalName = parsed.fileName;
+          const prefix2 = buildPrefix(chatName, timestamp);
+          return prefix2 ? `${prefix2} ${originalName}` : originalName;
+        }
       }
     } catch {
     }
-    if (videoId) return `${videoId}.${extension}`;
-    return `${Math.random().toString(36).substring(2, 10)}.${extension}`;
+    const prefix = buildPrefix(chatName, timestamp);
+    const baseName = `${fileId}.${extension}`;
+    return prefix ? `${prefix} ${baseName}` : baseName;
+  }
+  function buildPrefix(chatName, timestamp) {
+    const parts = [];
+    if (chatName) parts.push(`[${chatName}]`);
+    if (timestamp) parts.push(timestamp);
+    return parts.join(" ");
   }
   function dispatchProgress(videoId, progress, page, downloadId) {
     if (!videoId) return;
-    document.dispatchEvent(
-      new CustomEvent(`${videoId}_video_download_progress`, {
-        detail: { video_id: videoId, progress: progress.toFixed(0), page, download_id: downloadId }
-      })
-    );
+    window.postMessage({
+      type: "tele_down_progress",
+      video_id: videoId,
+      progress: progress.toFixed(0),
+      page,
+      download_id: downloadId
+    }, "*");
   }
   var MAX_RETRIES = 5;
   async function fetchWithRetry(url, init, label) {
@@ -64,9 +86,10 @@
         if (response.ok || response.status === 206) {
           return response;
         }
-        if (response.status >= 500 || response.status === 408) {
-          logger.info(`${label}: HTTP ${response.status}, retry ${attempt + 1}/${MAX_RETRIES}`);
-          await sleep(1e3 * (attempt + 1));
+        if (response.status >= 500 || response.status === 408 || response.status === 400) {
+          const delay = response.status === 400 ? 2e3 * (attempt + 1) : 1e3 * (attempt + 1);
+          logger.info(`${label}: HTTP ${response.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`);
+          await sleep(delay);
           continue;
         }
         throw new Error(`${label}: HTTP ${response.status}`);
@@ -86,12 +109,12 @@
     return new Promise((r) => setTimeout(r, ms));
   }
   var CONTENT_RANGE_REGEX = /^bytes (\d+)-(\d+)\/(\d+)$/;
-  async function downloadBlobUrl(url, videoId, page, downloadId) {
+  async function downloadBlobUrl(url, videoId, page, downloadId, chatName, timestamp) {
     const blobs = [];
     let offset = 0;
     let totalSize = null;
     let extension = "mp4";
-    let baseName = extractFileName(url, videoId, extension);
+    let baseName = buildFileName(url, videoId, extension, chatName, timestamp);
     const fetchNext = async () => {
       const response = await fetchWithRetry(
         url,
@@ -124,22 +147,23 @@
   }
   var CHUNK_ALIGN = 4096;
   var MAX_CHUNK = 1048576;
+  var MIN_CHUNK = 524288;
   function alignChunkSize(totalSize, targetSegments) {
     let size = Math.floor(totalSize / Math.max(1, targetSegments));
     size = Math.floor(size / CHUNK_ALIGN) * CHUNK_ALIGN;
-    return Math.max(CHUNK_ALIGN, Math.min(size, MAX_CHUNK));
+    return Math.max(MIN_CHUNK, Math.min(size, MAX_CHUNK));
   }
-  async function downloadSegmented(url, videoId, page, downloadId) {
+  async function downloadSegmented(url, videoId, page, downloadId, chatName, timestamp) {
     const probeResp = await fetchWithRetry(url, { headers: { Range: "bytes=0-0" } }, "Probe");
     const contentSize = parseInt(probeResp.headers.get("Content-Range")?.split("/")[1] || "0", 10);
     const contentType = probeResp.headers.get("Content-Type") || "application/octet-stream";
     if (!contentSize) throw new Error("Cannot determine content size");
-    const targetQueue = Math.max(1, currentSettings.downloadQueue || 500);
+    const targetQueue = Math.max(1, Math.min(currentSettings.downloadQueue || 50, 200));
     const segmentSize = alignChunkSize(contentSize, targetQueue);
     const numSegments = Math.ceil(contentSize / segmentSize);
-    const maxConcurrent = Math.max(1, currentSettings.parallelChunks || 10);
+    const maxConcurrent = Math.max(1, Math.min(currentSettings.parallelChunks || 3, 5));
     const ext = contentType.split("/")[1] || "mp4";
-    const fileName = extractFileName(url, videoId, ext);
+    const fileName = buildFileName(url, videoId, ext, chatName, timestamp);
     logger.info(
       `Download: ${numSegments} segs queued, ${formatBytes(contentSize)}, segSize=${formatBytes(segmentSize)}, concurrent=${maxConcurrent}`,
       fileName
@@ -167,6 +191,9 @@
           })
         )
       );
+      if (i + maxConcurrent < segments.length) {
+        await sleep(150);
+      }
     }
     const finalBlob = new Blob(buffers, { type: contentType });
     dispatchProgress(videoId, 100, page, downloadId);
@@ -191,28 +218,39 @@
     return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
   }
   async function handleSingleDownload(src) {
-    const { video_url, video_id, page, download_id } = src;
+    const { video_url, video_id, page, download_id, chat_name, timestamp } = src;
     if (!video_url) return;
-    if (activeDownloads.has(video_id)) {
-      logger.info(`Skipping duplicate download: ${video_id}`);
+    if (activeDownloads.has(video_id) || completedDownloads.has(video_id)) {
+      logger.info(`Skipping duplicate download: ${video_id} (${completedDownloads.has(video_id) ? "already completed" : "in progress"})`);
       return;
     }
-    activeDownloads.add(video_id);
     const resolvedUrl = resolveVideoUrl(video_url);
+    const fileId = extractFileId(resolvedUrl);
+    if (fileId && downloadedFileIds.has(fileId)) {
+      logger.info(`Skipping duplicate file: ${video_id} (fileId=${fileId} already downloaded)`);
+      dispatchProgress(video_id, 100, page, download_id);
+      completedDownloads.add(video_id);
+      return;
+    }
+    if (fileId) downloadedFileIds.add(fileId);
+    activeDownloads.add(video_id);
     try {
       if (resolvedUrl.startsWith("blob:")) {
-        await downloadBlobUrl(resolvedUrl, video_id, page, download_id);
+        await downloadBlobUrl(resolvedUrl, video_id, page, download_id, chat_name, timestamp);
       } else {
-        await downloadSegmented(resolvedUrl, video_id, page, download_id);
+        await downloadSegmented(resolvedUrl, video_id, page, download_id, chat_name, timestamp);
       }
+      completedDownloads.add(video_id);
     } catch (error) {
+      if (fileId) downloadedFileIds.delete(fileId);
       const msg = error instanceof Error ? error.message : String(error);
       logger.error(msg, video_id);
-      document.dispatchEvent(
-        new CustomEvent(`${video_id}_video_download_error`, {
-          detail: { video_id, error: msg, download_id }
-        })
-      );
+      window.postMessage({
+        type: "tele_down_error",
+        video_id,
+        error: msg,
+        download_id
+      }, "*");
     } finally {
       activeDownloads.delete(video_id);
     }
