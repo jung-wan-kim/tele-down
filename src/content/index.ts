@@ -335,9 +335,12 @@ async function autoScrollAndDownload(): Promise<void> {
   scanProgress = 0;
   updateControlPanel(computePanelState());
 
-  console.log('[TeleDown] Sequential scan started (scrolling UP through history)');
-
+  const viewportHeight = scrollContainer.clientHeight;
+  const scrollStep = Math.max(viewportHeight * 0.7, 200);
   const startScrollTop = scrollContainer.scrollTop;
+
+  console.log(`[TeleDown] Sequential scan started — startScrollTop=${startScrollTop}, scrollStep=${Math.round(scrollStep)}, viewportHeight=${viewportHeight}, scrollHeight=${scrollContainer.scrollHeight}`);
+
   let totalResolved = 0;
 
   try {
@@ -349,15 +352,16 @@ async function autoScrollAndDownload(): Promise<void> {
     // Step 2: Scroll UP step-by-step using deterministic target position.
     // triggerVideoLoad opens/closes media viewer which disrupts scroll position,
     // so we track our own targetPosition that decreases monotonically.
-    const viewportHeight = scrollContainer.clientHeight;
-    const scrollStep = Math.max(viewportHeight * 0.7, 200);
 
     let targetPosition = startScrollTop;
     let lastScrollHeight = scrollContainer.scrollHeight;
 
     while (!scanAborted) {
       // Calculate next position (always moves UP)
+      const prevTarget = targetPosition;
       targetPosition = Math.max(0, targetPosition - scrollStep);
+
+      console.log(`[TeleDown] Scroll: ${Math.round(prevTarget)} → ${Math.round(targetPosition)} (actual=${scrollContainer.scrollTop})`);
 
       // Force scroll to target (overrides any shift from media viewer)
       scrollContainer.scrollTop = targetPosition;
@@ -391,9 +395,11 @@ async function autoScrollAndDownload(): Promise<void> {
         await sleep(1500);
         const newScrollHeight = scrollContainer.scrollHeight;
         if (newScrollHeight <= lastScrollHeight + 100) {
+          console.log(`[TeleDown] Top reached, no more history (scrollHeight=${newScrollHeight})`);
           break; // No more history to load
         }
         // Telegram loaded older messages — scrollHeight grew
+        console.log(`[TeleDown] Top reached, more history loading (scrollHeight: ${lastScrollHeight} → ${newScrollHeight})`);
         lastScrollHeight = newScrollHeight;
         // Stay at top to process newly loaded content
         continue;
@@ -410,11 +416,16 @@ async function autoScrollAndDownload(): Promise<void> {
     }
 
     // Mark any remaining unresolved items as errors
+    const unresolved: string[] = [];
     for (const item of videoQueue.values()) {
       if (item.status === 'pending' && !item.videoUrl) {
         item.status = 'error';
         updateButtonError(item.videoId);
+        unresolved.push(item.videoId);
       }
+    }
+    if (unresolved.length > 0) {
+      console.log(`[TeleDown] Marking ${unresolved.length} unresolved as error: ${unresolved.join(', ')}`);
     }
 
     scanProgress = 100;
@@ -446,19 +457,31 @@ async function scanAndResolveAtPosition(): Promise<number> {
   // Detect videos and add to queue
   processScannedVideos();
 
-  // Find all pending items that need URL resolution and are currently in the DOM
-  const toResolve = Array.from(videoQueue.values()).filter(
-    (v) => v.status === 'pending' && !v.videoUrl && v.containerElement?.isConnected,
+  // Count all pending items without URL (including disconnected ones)
+  const allPending = Array.from(videoQueue.values()).filter(
+    (v) => v.status === 'pending' && !v.videoUrl,
   );
+  const connected = allPending.filter((v) => v.containerElement?.isConnected);
+  const disconnected = allPending.filter((v) => !v.containerElement?.isConnected);
 
-  if (toResolve.length === 0) return 0;
+  if (disconnected.length > 0) {
+    console.log(`[TeleDown] ${disconnected.length} items skipped (disconnected): ${disconnected.map(v => v.videoId).join(', ')}`);
+  }
+
+  if (connected.length === 0) return 0;
 
   let resolved = 0;
-  for (const item of toResolve) {
+  let skippedDisconnect = 0;
+  let failedLoad = 0;
+  for (const item of connected) {
     if (scanAborted) break;
 
     // Re-check: previous triggerVideoLoad may have caused Telegram to re-render
-    if (!item.containerElement?.isConnected) continue;
+    if (!item.containerElement?.isConnected) {
+      skippedDisconnect++;
+      console.log(`[TeleDown] [${item.videoId}] disconnected during resolution (other click caused re-render)`);
+      continue;
+    }
 
     // Fast: check if video src is already in DOM
     const url = tryGetVideoUrl(item.containerElement);
@@ -473,15 +496,16 @@ async function scanAndResolveAtPosition(): Promise<number> {
     if (loadedUrl) {
       item.videoUrl = loadedUrl;
       resolved++;
+    } else {
+      failedLoad++;
+      console.log(`[TeleDown] [${item.videoId}] triggerVideoLoad failed (container.isConnected=${item.containerElement?.isConnected})`);
     }
 
     // Brief pause between each video to let Telegram stabilize
     await sleep(300);
   }
 
-  if (resolved > 0) {
-    console.log(`[TeleDown] Resolved ${resolved}/${toResolve.length} at current position`);
-  }
+  console.log(`[TeleDown] Position result: ${resolved} resolved, ${skippedDisconnect} disconnected mid-process, ${failedLoad} load failed (of ${connected.length} attempted)`);
 
   return resolved;
 }
