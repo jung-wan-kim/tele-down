@@ -41,11 +41,7 @@ interface QueueItem {
   containerElement?: HTMLElement;
   /** Message timestamp for filename */
   timestamp?: string;
-  /** Number of URL resolve attempts (error only after MAX_RESOLVE_RETRIES) */
-  resolveAttempts?: number;
 }
-
-const MAX_RESOLVE_RETRIES = 2;
 
 /** All detected videos for the current chat */
 const videoQueue = new Map<string, QueueItem>();
@@ -169,177 +165,28 @@ function requestDownload(videoUrl: string, videoId: string): void {
   );
 }
 
-/** Try to resolve a single video's URL.
- *  Handles the case where the DOM element has been detached by Telegram's
- *  virtual scrolling — re-finds the bubble by scrolling to its message ID. */
-async function resolveOneVideoUrl(item: QueueItem): Promise<string | null> {
-  // Fast path: container still in DOM
-  if (item.containerElement?.isConnected) {
-    console.log(`[TeleDown] [${item.videoId}] container connected, trying direct resolve`);
-    const url = tryGetVideoUrl(item.containerElement);
-    if (url) return url;
-    const loadedUrl = await triggerVideoLoad(item.containerElement);
-    if (loadedUrl) return loadedUrl;
-    // triggerVideoLoad failed with connected container — DOM might be stale
-    // Clear reference so next attempt uses scrollToBubble
-    console.log(`[TeleDown] [${item.videoId}] triggerVideoLoad failed, clearing container ref`);
-    item.containerElement = undefined;
-    return null;
-  }
-
-  // Container detached (virtual scroll removed it) — scroll to re-find
-  console.log(`[TeleDown] [${item.videoId}] container disconnected, using scrollToBubble`);
-  const scrollContainer = getScrollContainer();
-  if (!scrollContainer) return null;
-
-  const bubble = await scrollToBubble(item.videoId, scrollContainer);
-  if (!bubble) {
-    console.log(`[TeleDown] [${item.videoId}] scrollToBubble returned null`);
-    return null;
-  }
-
-  // Update container reference to the live DOM element
-  const container =
-    bubble.querySelector<HTMLElement>('.media-container') ||
-    bubble.querySelector<HTMLElement>('.media-video')?.parentElement ||
-    bubble;
-  item.containerElement = container;
-
-  const url = tryGetVideoUrl(container);
-  if (url) return url;
-
-  return await triggerVideoLoad(container);
-}
-
 /**
- * Download all pending videos in two phases:
- *
- * Phase 1 — Resolve URLs (sequential, requires scrolling through chat)
- *   Telegram's virtual scroll removes DOM elements outside the viewport.
- *   We scroll to each message in order to re-render its bubble, then
- *   click the play button to obtain the stream URL.
- *   NEW: Continuously processes newly detected videos WITHOUT scrolling
- *   back to bottom, so we stay near the area where videos are being found.
- *
- * Phase 2 — Download files (parallel sliding-window)
- *   Once URLs are known, download concurrently.
+ * Download all resolved videos (dedup + sliding window).
+ * No URL resolution here — all URLs should be resolved during scan.
  */
-async function startAllPendingDownloads(): Promise<void> {
+async function startDownloads(): Promise<void> {
   if (isProcessing) return;
   isProcessing = true;
 
   try {
     const maxParallel = Math.max(1, Math.min(settings.parallelDownloads || 2, 5));
 
-    // ── Phase 1: Continuously resolve URLs ──
-    // Process pending videos in a loop: as new videos are detected during
-    // scrolling (periodic scan), they get processed immediately in the next
-    // iteration — while we're still scrolled near them.
-    const processedIds = new Set<string>();
-    let totalResolved = 0;
-    let pass = 0;
-
-    while (true) {
-      const needResolve = Array.from(videoQueue.values()).filter(
-        (v) => v.status === 'pending' && !v.videoUrl && !processedIds.has(v.videoId),
-      );
-      // Also pick up items that failed but haven't exhausted retries
-      const retryable = Array.from(videoQueue.values()).filter(
-        (v) => v.status === 'error' && !v.videoUrl
-          && (v.resolveAttempts || 0) < MAX_RESOLVE_RETRIES
-          && !processedIds.has(v.videoId),
-      );
-      const allToResolve = [...needResolve, ...retryable];
-
-      if (allToResolve.length === 0) break;
-
-      pass++;
-      // Sort by message ID ascending (oldest → newest = top → bottom)
-      allToResolve.sort((a, b) => {
-        const midA = parseInt(a.videoId.replace(/^[ka]-/, ''), 10) || 0;
-        const midB = parseInt(b.videoId.replace(/^[ka]-/, ''), 10) || 0;
-        return midA - midB;
-      });
-
-      const totalPending = Array.from(videoQueue.values()).filter(v => v.status === 'pending' || v.status === 'error').length;
-      const retryCount = retryable.length;
-      console.log(
-        `[TeleDown] Phase 1 pass ${pass}: ${needResolve.length} new + ${retryCount} retry (total unresolved: ${totalPending})`,
-      );
-
-      for (const item of allToResolve) {
-        if (item.videoUrl) {
-          processedIds.add(item.videoId);
-          continue;
-        }
-        // Reset error status for retry
-        if (item.status === 'error') {
-          item.status = 'pending';
-          console.log(`[TeleDown] [${item.videoId}] retrying (attempt ${(item.resolveAttempts || 0) + 1}/${MAX_RESOLVE_RETRIES})`);
-        }
-        if (item.status !== 'pending') {
-          processedIds.add(item.videoId);
-          continue;
-        }
-
-        console.log(`[TeleDown] [${item.videoId}] resolving URL...`);
-        const url = await resolveOneVideoUrl(item);
-        if (url) {
-          item.videoUrl = url;
-          item.resolveAttempts = 0;
-          totalResolved++;
-          processedIds.add(item.videoId); // Only mark processed on SUCCESS
-          console.log(`[TeleDown] [${item.videoId}] URL resolved`);
-        } else {
-          const attempts = (item.resolveAttempts || 0) + 1;
-          item.resolveAttempts = attempts;
-          if (attempts >= MAX_RESOLVE_RETRIES) {
-            console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED after ${attempts} attempts, marking as error`);
-            item.status = 'error';
-            processedIds.add(item.videoId); // Exhausted retries — permanently done
-            updateButtonError(item.videoId);
-          } else {
-            console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED (attempt ${attempts}/${MAX_RESOLVE_RETRIES}), will retry next pass`);
-            item.status = 'error'; // temporarily error; NOT added to processedIds → retryable next pass
-          }
-        }
-
-        // Brief DOM stabilization after each resolve attempt
-        await sleep(200);
-
-        // Opportunistic: while scrolled here, check other pending items in DOM
-        for (const [, other] of videoQueue) {
-          if (other.status !== 'pending' || other.videoUrl) continue;
-          if (!other.containerElement?.isConnected) continue;
-          const otherUrl = tryGetVideoUrl(other.containerElement);
-          if (otherUrl) {
-            other.videoUrl = otherUrl;
-            totalResolved++;
-            console.log(`[TeleDown] [${other.videoId}] URL resolved (opportunistic)`);
-          }
-        }
-      }
-
-      console.log(`[TeleDown] Phase 1 pass ${pass} done (total resolved: ${totalResolved})`);
-      // Loop continues: check if new pending videos appeared during this pass
-    }
-
-    if (totalResolved === 0 && pass === 0) {
-      console.log('[TeleDown] No pending videos to download');
-    }
-
-    // Scroll back to bottom ONCE (natural chat position)
+    // Scroll back to bottom (natural chat position)
     const sc = getScrollContainer();
     if (sc) {
       sc.scrollTop = sc.scrollHeight;
       await sleep(500);
     }
 
-    // ── Phase 2: Download with sliding window concurrency ──
-    // Dedup by file ID (not URL string) — same file may have different URL formats
+    // Dedup by file ID — same file may appear in multiple messages
     const seenFileIds = new Set<string>();
     const readyToDownload: QueueItem[] = [];
-    for (const item of Array.from(videoQueue.values())) {
+    for (const item of videoQueue.values()) {
       if (item.status !== 'pending' || !item.videoUrl) continue;
       const fileId = extractFileIdFromUrl(item.videoUrl);
       if (fileId) {
@@ -355,11 +202,11 @@ async function startAllPendingDownloads(): Promise<void> {
     updateControlPanel(computePanelState());
 
     if (readyToDownload.length === 0) {
-      console.log('[TeleDown] No videos ready to download');
+      console.log('[TeleDown] No unique videos to download');
       return;
     }
 
-    console.log(`[TeleDown] Phase 2: Downloading ${readyToDownload.length} unique videos...`);
+    console.log(`[TeleDown] Downloading ${readyToDownload.length} unique videos...`);
 
     let nextIdx = 0;
     let activeCount = 0;
@@ -462,21 +309,17 @@ function getScrollContainer(): HTMLElement | null {
 }
 
 /**
- * Auto-scroll through the entire chat history, detect videos AND resolve URLs
- * in a single pass, then download.
+ * Auto-scroll through chat history, detect AND resolve URLs one by one,
+ * then download all resolved videos.
  *
- * Chat scrolls UPWARD to load older messages (newest at bottom, oldest at top).
+ * At each scroll position:
+ * 1. Detect visible videos (scanForVideos)
+ * 2. For each newly detected video, immediately resolve its URL (one at a time)
+ *    — container is guaranteed connected at this point
+ * 3. Scroll UP, repeat until top of chat history
+ * 4. After full scan, download all videos that have URLs
  *
- * Strategy:
- * 1. Scan + resolve at current position (bottom — newest messages)
- * 2. Scroll UP step-by-step to discover older messages
- * 3. At each step, detect videos AND immediately resolve URLs
- *    (containers are guaranteed connected at this point)
- * 4. When top is reached (scrollTop=0) and no more history loads, stop
- * 5. Scroll back to bottom, then download all resolved videos
- *
- * This eliminates the need for scrollToBubble — URLs are resolved while
- * containers are still in the DOM, avoiding virtual scroll detachment issues.
+ * No scrollToBubble, no retry phases — resolve happens during scan or not at all.
  */
 async function autoScrollAndDownload(): Promise<void> {
   if (isScanning) return;
@@ -484,7 +327,6 @@ async function autoScrollAndDownload(): Promise<void> {
   const scrollContainer = getScrollContainer();
   if (!scrollContainer) {
     console.warn('[TeleDown] Cannot find scroll container');
-    startAllPendingDownloads();
     return;
   }
 
@@ -493,15 +335,14 @@ async function autoScrollAndDownload(): Promise<void> {
   scanProgress = 0;
   updateControlPanel(computePanelState());
 
-  console.log('[TeleDown] Scan+Resolve started (scrolling UP through history)');
+  console.log('[TeleDown] Sequential scan started (scrolling UP through history)');
 
   const startScrollTop = scrollContainer.scrollTop;
   let totalResolved = 0;
 
   try {
-    // Step 1: Scan + resolve at current position (bottom)
-    processScannedVideos();
-    totalResolved += await resolveConnectedUrls();
+    // Step 1: Process at current position (bottom — newest messages)
+    totalResolved += await scanAndResolveAtPosition();
 
     if (scanAborted) return;
 
@@ -535,20 +376,16 @@ async function autoScrollAndDownload(): Promise<void> {
         lastScrollHeight = newScrollHeight;
       }
 
-      // Scroll UP one step (gentler — avoid triggering Telegram's intersection observer debugger)
-      const targetScrollTop = Math.max(0, currentScrollTop - scrollStep);
-      scrollContainer.scrollTop = targetScrollTop;
+      // Scroll UP one step
+      scrollContainer.scrollTop = Math.max(0, currentScrollTop - scrollStep);
 
       // Wait for Telegram to lazy-load + render
       await sleep(1000);
 
       if (scanAborted) break;
 
-      // Detect videos at current position
-      processScannedVideos();
-
-      // Immediately resolve URLs while containers are connected
-      totalResolved += await resolveConnectedUrls();
+      // Detect + resolve one by one at this position
+      totalResolved += await scanAndResolveAtPosition();
 
       if (scanAborted) break;
 
@@ -565,37 +402,49 @@ async function autoScrollAndDownload(): Promise<void> {
       lastScrollHeight = scrollContainer.scrollHeight;
     }
 
-    // Final scan + resolve at topmost position
+    // Final pass at topmost position
     if (!scanAborted) {
-      processScannedVideos();
-      totalResolved += await resolveConnectedUrls();
+      totalResolved += await scanAndResolveAtPosition();
+    }
+
+    // Mark any remaining unresolved items as errors
+    for (const item of videoQueue.values()) {
+      if (item.status === 'pending' && !item.videoUrl) {
+        item.status = 'error';
+        updateButtonError(item.videoId);
+      }
     }
 
     scanProgress = 100;
     updateControlPanel(computePanelState());
 
-    const pending = Array.from(videoQueue.values()).filter(v => v.status === 'pending').length;
-    const withUrl = Array.from(videoQueue.values()).filter(v => v.status === 'pending' && v.videoUrl).length;
-    console.log(`[TeleDown] Scan+Resolve complete: ${videoQueue.size} detected, ${totalResolved} resolved, ${pending} pending (${withUrl} with URL)`);
+    const total = videoQueue.size;
+    const withUrl = Array.from(videoQueue.values()).filter(v => v.videoUrl).length;
+    const errors = Array.from(videoQueue.values()).filter(v => v.status === 'error').length;
+    console.log(`[TeleDown] Scan complete: ${total} detected, ${withUrl} URLs resolved, ${errors} errors`);
   } finally {
     isScanning = false;
     scanProgress = 0;
     updateControlPanel(computePanelState());
   }
 
-  // Start downloading all resolved videos
+  // Download all resolved videos
   if (!scanAborted) {
     broadcastSettings();
-    await startAllPendingDownloads();
+    await startDownloads();
   }
 }
 
 /**
- * Resolve URLs for all pending videos that have connected containers.
- * Called during the scroll scan — containers are guaranteed to be in the DOM.
- * Returns the number of newly resolved URLs.
+ * Detect videos at current scroll position and resolve each URL one by one.
+ * Called during auto-scroll — containers are guaranteed connected.
+ * Returns number of newly resolved URLs.
  */
-async function resolveConnectedUrls(): Promise<number> {
+async function scanAndResolveAtPosition(): Promise<number> {
+  // Detect videos and add to queue
+  processScannedVideos();
+
+  // Find all pending items that need URL resolution and are currently in the DOM
   const toResolve = Array.from(videoQueue.values()).filter(
     (v) => v.status === 'pending' && !v.videoUrl && v.containerElement?.isConnected,
   );
@@ -606,27 +455,30 @@ async function resolveConnectedUrls(): Promise<number> {
   for (const item of toResolve) {
     if (scanAborted) break;
 
-    // Fast check: already has src?
-    const url = tryGetVideoUrl(item.containerElement!);
+    // Re-check: previous triggerVideoLoad may have caused Telegram to re-render
+    if (!item.containerElement?.isConnected) continue;
+
+    // Fast: check if video src is already in DOM
+    const url = tryGetVideoUrl(item.containerElement);
     if (url) {
       item.videoUrl = url;
       resolved++;
       continue;
     }
 
-    // Need click to trigger loading
-    const loadedUrl = await triggerVideoLoad(item.containerElement!);
+    // Slow: click to open media viewer → extract stream URL → close viewer
+    const loadedUrl = await triggerVideoLoad(item.containerElement);
     if (loadedUrl) {
       item.videoUrl = loadedUrl;
       resolved++;
     }
 
-    // Brief pause between clicks to let Telegram stabilize
+    // Brief pause between each video to let Telegram stabilize
     await sleep(300);
   }
 
   if (resolved > 0) {
-    console.log(`[TeleDown] Resolved ${resolved} URLs at current scroll position`);
+    console.log(`[TeleDown] Resolved ${resolved}/${toResolve.length} at current position`);
   }
 
   return resolved;
@@ -646,102 +498,6 @@ function stopScanning(): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-// ============================================================
-// Virtual Scroll: Re-find bubbles removed from DOM
-// ============================================================
-
-/**
- * Find a message bubble by its video ID, scrolling through chat if the
- * element has been virtualized away (removed from DOM by Telegram's
- * virtual scrolling).
- *
- * Videos are processed in ascending mid order, so the scroll direction
- * is always forward (downward) for maximum efficiency.
- */
-async function scrollToBubble(
-  videoId: string,
-  scrollContainer: HTMLElement,
-): Promise<HTMLElement | null> {
-  // Build the DOM selector from the video ID prefix
-  let selector: string;
-  let midAttr: string;
-  if (videoId.startsWith('k-')) {
-    selector = `.bubble[data-mid="${videoId.substring(2)}"]`;
-    midAttr = 'data-mid';
-  } else if (videoId.startsWith('a-')) {
-    selector = `[data-message-id="${videoId.substring(2)}"]`;
-    midAttr = 'data-message-id';
-  } else {
-    return null; // viewer/story IDs can't be scrolled to
-  }
-
-  // Already in DOM?
-  let el = document.querySelector<HTMLElement>(selector);
-  if (el?.isConnected) {
-    el.scrollIntoView({ behavior: 'instant', block: 'center' });
-    await sleep(300);
-    return el;
-  }
-
-  // Determine scroll direction from currently visible message IDs
-  const visibleIds = Array.from(
-    document.querySelectorAll<HTMLElement>(`[${midAttr}]`),
-  )
-    .map((b) => parseInt(b.getAttribute(midAttr) || '0', 10))
-    .filter((m) => m > 0);
-
-  const targetId = parseInt(videoId.replace(/^[ka]-/, ''), 10);
-  if (isNaN(targetId) || visibleIds.length === 0) return null;
-
-  const minVisible = Math.min(...visibleIds);
-  const maxVisible = Math.max(...visibleIds);
-  const direction = targetId < minVisible ? -1 : 1;
-  const step = scrollContainer.clientHeight * 0.6;
-  const maxAttempts = 80;
-
-  for (let i = 0; i < maxAttempts; i++) {
-    scrollContainer.scrollTop += direction * step;
-    await sleep(400);
-
-    el = document.querySelector<HTMLElement>(selector);
-    if (el?.isConnected) {
-      el.scrollIntoView({ behavior: 'instant', block: 'center' });
-      await sleep(300);
-      return el;
-    }
-
-    // Boundary: hit top — wait for Telegram to load older messages
-    if (direction < 0 && scrollContainer.scrollTop <= 0) {
-      const prevHeight = scrollContainer.scrollHeight;
-      for (let retry = 0; retry < 3; retry++) {
-        await sleep(1000);
-        el = document.querySelector<HTMLElement>(selector);
-        if (el?.isConnected) {
-          el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          await sleep(300);
-          return el;
-        }
-        // If Telegram loaded more history (scrollHeight grew), keep trying
-        if (scrollContainer.scrollHeight > prevHeight + 100) {
-          scrollContainer.scrollTop = 0; // Stay at top to load more
-          continue;
-        }
-      }
-      break;
-    }
-    // Boundary: hit bottom
-    if (
-      direction > 0 &&
-      scrollContainer.scrollTop + scrollContainer.clientHeight >=
-        scrollContainer.scrollHeight - 10
-    ) {
-      break;
-    }
-  }
-
-  return null;
 }
 
 // ============================================================
