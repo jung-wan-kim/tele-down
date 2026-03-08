@@ -134,68 +134,7 @@ function requestDownload(videoUrl: string, videoId: string): void {
     data: { videoId, downloadId, progress: 0, status: 'downloading', fileName: videoId },
   }).catch(() => {});
 
-  // Progress listener
-  const progressHandler = ((event: CustomEvent) => {
-    const progress = parseFloat(event.detail.progress);
-    item.progress = progress;
-    updateButtonProgress(videoId, progress);
-    updateControlPanel(computePanelState());
-
-    chrome.runtime.sendMessage({
-      action: 'downloadProgress',
-      data: { videoId, downloadId, progress, status: 'downloading' },
-    }).catch(() => {});
-
-    if (progress >= 99.9) {
-      item.status = 'completed';
-      videoQueue.set(videoId, item);
-      updateButtonCompleted(videoId);
-      updateControlPanel(computePanelState());
-
-      chrome.runtime.sendMessage({
-        action: 'downloadCompleted',
-        data: { videoId, downloadId, progress: 100, status: 'completed' },
-      }).catch(() => {});
-
-      document.removeEventListener(
-        `${videoId}_video_download_progress`,
-        progressHandler as EventListener,
-      );
-    }
-  }) as EventListener;
-
-  // Error listener
-  const errorHandler = ((event: CustomEvent) => {
-    item.status = 'error';
-    videoQueue.set(videoId, item);
-    updateButtonError(videoId);
-    updateControlPanel(computePanelState());
-
-    chrome.runtime.sendMessage({
-      action: 'downloadError',
-      data: {
-        videoId,
-        downloadId,
-        progress: 0,
-        status: 'error',
-        error: event.detail?.error || 'Unknown error',
-      },
-    }).catch(() => {});
-
-    document.removeEventListener(
-      `${videoId}_video_download_progress`,
-      progressHandler as EventListener,
-    );
-    document.removeEventListener(
-      `${videoId}_video_download_error`,
-      errorHandler as EventListener,
-    );
-  }) as EventListener;
-
-  document.addEventListener(`${videoId}_video_download_progress`, progressHandler);
-  document.addEventListener(`${videoId}_video_download_error`, errorHandler);
-
-  // Dispatch to injected script
+  // Dispatch download request to injected script (content → page: detail works)
   document.dispatchEvent(
     new CustomEvent('video_download', {
       detail: {
@@ -650,42 +589,107 @@ function onAutoDownloadToggle(enabled: boolean): void {
 }
 
 // ============================================================
-// File save handler (inject script → content → background)
-// Uses window.postMessage (not CustomEvent) to cross Chrome's world boundary
+// Unified postMessage handler (inject script → content script)
+// ALL inject→content communication uses postMessage because
+// CustomEvent.detail is null across Chrome's world boundary
 // ============================================================
 
 window.addEventListener('message', (event) => {
-  if (event.source !== window || event.data?.type !== 'tele_down_save') return;
+  if (event.source !== window) return;
+  const msg = event.data;
+  if (!msg?.type) return;
 
-  const { blobUrl, fileName, folder } = event.data;
-  if (!blobUrl || !fileName) return;
+  switch (msg.type) {
+    // ---- Download progress ----
+    case 'tele_down_progress': {
+      const videoId = msg.video_id as string;
+      const progress = parseFloat(msg.progress);
+      if (!videoId || isNaN(progress)) return;
 
-  console.log(`[TeleDown] Saving: ${folder}/${fileName}`);
+      const item = videoQueue.get(videoId);
+      if (!item) return;
 
-  chrome.runtime.sendMessage({
-    action: 'saveToDisk',
-    data: { blobUrl, fileName, folder },
-  }).then((response) => {
-    if (!response?.success) {
-      console.warn('[TeleDown] chrome.downloads failed, using fallback <a> download');
-      // Fallback: use <a> tag download (no folder, but at least the file saves)
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      item.progress = progress;
+      updateButtonProgress(videoId, progress);
+      updateControlPanel(computePanelState());
+
+      chrome.runtime.sendMessage({
+        action: 'downloadProgress',
+        data: { videoId, downloadId: msg.download_id || '', progress, status: 'downloading' },
+      }).catch(() => {});
+
+      if (progress >= 99.9) {
+        item.status = 'completed';
+        videoQueue.set(videoId, item);
+        updateButtonCompleted(videoId);
+        updateControlPanel(computePanelState());
+
+        chrome.runtime.sendMessage({
+          action: 'downloadCompleted',
+          data: { videoId, downloadId: msg.download_id || '', progress: 100, status: 'completed' },
+        }).catch(() => {});
+      }
+      break;
     }
-  }).catch((err) => {
-    console.error('[TeleDown] saveToDisk error:', err);
-    // Fallback
-    const a = document.createElement('a');
-    a.href = blobUrl;
-    a.download = fileName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  });
+
+    // ---- Download error ----
+    case 'tele_down_error': {
+      const videoId = msg.video_id as string;
+      if (!videoId) return;
+
+      const item = videoQueue.get(videoId);
+      if (!item) return;
+
+      item.status = 'error';
+      videoQueue.set(videoId, item);
+      updateButtonError(videoId);
+      updateControlPanel(computePanelState());
+
+      chrome.runtime.sendMessage({
+        action: 'downloadError',
+        data: {
+          videoId,
+          downloadId: msg.download_id || '',
+          progress: 0,
+          status: 'error',
+          error: msg.error || 'Unknown error',
+        },
+      }).catch(() => {});
+      break;
+    }
+
+    // ---- File save (inject → content → background) ----
+    case 'tele_down_save': {
+      const { blobUrl, fileName, folder } = msg;
+      if (!blobUrl || !fileName) return;
+
+      console.log(`[TeleDown] Saving: ${folder}/${fileName}`);
+
+      chrome.runtime.sendMessage({
+        action: 'saveToDisk',
+        data: { blobUrl, fileName, folder },
+      }).then((response) => {
+        if (!response?.success) {
+          console.warn('[TeleDown] chrome.downloads failed, using fallback <a> download');
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = fileName;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
+      }).catch((err) => {
+        console.error('[TeleDown] saveToDisk error:', err);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      });
+      break;
+    }
+  }
 });
 
 // ============================================================

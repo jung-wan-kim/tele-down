@@ -114,11 +114,15 @@ function extractFileName(url: string, videoId: string, extension: string): strin
 
 function dispatchProgress(videoId: string, progress: number, page?: string, downloadId?: string): void {
   if (!videoId) return;
-  document.dispatchEvent(
-    new CustomEvent(`${videoId}_video_download_progress`, {
-      detail: { video_id: videoId, progress: progress.toFixed(0), page, download_id: downloadId },
-    }),
-  );
+  // Use postMessage (NOT CustomEvent) — CustomEvent.detail is null across Chrome's
+  // isolated world boundary (page context → content script)
+  window.postMessage({
+    type: 'tele_down_progress',
+    video_id: videoId,
+    progress: progress.toFixed(0),
+    page,
+    download_id: downloadId,
+  }, '*');
 }
 
 // ============================================================
@@ -372,11 +376,12 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error(msg, video_id);
-    document.dispatchEvent(
-      new CustomEvent(`${video_id}_video_download_error`, {
-        detail: { video_id, error: msg, download_id },
-      }),
-    );
+    window.postMessage({
+      type: 'tele_down_error',
+      video_id,
+      error: msg,
+      download_id,
+    }, '*');
   } finally {
     activeDownloads.delete(video_id);
   }
