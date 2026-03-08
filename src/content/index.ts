@@ -148,11 +148,14 @@ function requestDownload(videoUrl: string, videoId: string): void {
 // Manual Download (button click handler)
 // ============================================================
 
+/** Queue for downloads that need media viewer (one at a time) */
+const pendingDownloads: string[] = [];
+let isProcessingQueue = false;
+
 /**
  * Handle manual download button click:
- * 1. If URL already resolved → download immediately
- * 2. If not → try to get URL from DOM, or open media viewer to extract stream URL
- * 3. Then dispatch download to injected script
+ * - If URL already resolved → download immediately (parallel OK)
+ * - If URL needs media viewer → queue and process one at a time
  */
 async function handleManualDownload(videoId: string): Promise<void> {
   const item = videoQueue.get(videoId);
@@ -164,31 +167,55 @@ async function handleManualDownload(videoId: string): Promise<void> {
     item.status = 'pending';
   }
 
-  let url = item.videoUrl;
+  // If URL already known → download immediately (no media viewer needed)
+  if (item.videoUrl) {
+    broadcastSettings();
+    requestDownload(item.videoUrl, videoId);
+    return;
+  }
 
-  if (!url) {
-    // Try to get URL from current DOM element
+  // URL not known → needs media viewer → queue it
+  if (!pendingDownloads.includes(videoId)) {
+    pendingDownloads.push(videoId);
+    console.log(`[TeleDown] [${videoId}] Queued for URL resolution (queue: ${pendingDownloads.length})`);
+  }
+  processDownloadQueue();
+}
+
+/** Process queued downloads one at a time (media viewer can only show one video) */
+async function processDownloadQueue(): Promise<void> {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+
+  while (pendingDownloads.length > 0) {
+    const videoId = pendingDownloads.shift()!;
+    const item = videoQueue.get(videoId);
+    if (!item || item.status === 'downloading' || item.status === 'completed') continue;
+
+    let url = '';
+
+    // Try DOM element first
     if (item.containerElement?.isConnected) {
       url = tryGetVideoUrl(item.containerElement) || '';
 
       if (!url) {
-        // Slow path: click to open media viewer → extract stream URL → close
-        console.log(`[TeleDown] [${videoId}] No URL in DOM, trying triggerVideoLoad...`);
+        console.log(`[TeleDown] [${videoId}] Opening media viewer to get URL...`);
         url = await triggerVideoLoad(item.containerElement) || '';
       }
     }
 
     if (!url) {
-      console.warn(`[TeleDown] [${videoId}] Failed to resolve URL (container connected=${item.containerElement?.isConnected})`);
+      console.warn(`[TeleDown] [${videoId}] Failed to resolve URL`);
       updateButtonError(videoId);
-      return;
+      continue;
     }
 
     item.videoUrl = url;
+    broadcastSettings();
+    requestDownload(url, videoId);
   }
 
-  broadcastSettings();
-  requestDownload(url, videoId);
+  isProcessingQueue = false;
 }
 
 // ============================================================
