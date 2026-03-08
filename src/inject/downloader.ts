@@ -52,7 +52,6 @@ interface SingleVideoSource {
   page?: string;
   download_id?: string;
   chat_name?: string;
-  timestamp?: string;
 }
 
 // ============================================================
@@ -111,42 +110,32 @@ function resolveVideoUrl(url: string): string {
 // ============================================================
 
 /**
- * Build filename: [채팅방이름] 타임스탬프_파일ID.ext
- * e.g. "[개발채널] 20240301_1430_6138491001745972629.mp4"
+ * Build filename: [채팅방이름]파일ID.ext
+ * e.g. "[개발채널]6138491001745972629.mp4"
  */
 function buildFileName(
   url: string,
   videoId: string,
   extension: string,
   chatName?: string,
-  timestamp?: string,
 ): string {
-  // Extract a short file ID from the stream URL or videoId
+  // Extract file ID from the stream URL or use videoId
   let fileId = videoId;
   try {
     if (url.includes('stream/')) {
       const encodedPart = url.substring(url.indexOf('stream/') + 7).split('?')[0];
       const parsed = JSON.parse(decodeURIComponent(encodedPart));
       if (parsed?.location?.id) fileId = String(parsed.location.id);
-      // If Telegram provides a real filename, use it as-is with prefix
+      // If Telegram provides a real filename, use it with prefix
       if (parsed?.fileName) {
-        const originalName = parsed.fileName;
-        const prefix = buildPrefix(chatName, timestamp);
-        return prefix ? `${prefix} ${originalName}` : originalName;
+        const prefix = chatName ? `[${chatName}]` : '';
+        return prefix ? `${prefix}${parsed.fileName}` : parsed.fileName;
       }
     }
   } catch { /* fallback */ }
 
-  const prefix = buildPrefix(chatName, timestamp);
-  const baseName = `${fileId}.${extension}`;
-  return prefix ? `${prefix} ${baseName}` : baseName;
-}
-
-function buildPrefix(chatName?: string, timestamp?: string): string {
-  const parts: string[] = [];
-  if (chatName) parts.push(`[${chatName}]`);
-  if (timestamp) parts.push(timestamp);
-  return parts.join(' ');
+  const prefix = chatName ? `[${chatName}]` : '';
+  return `${prefix}${fileId}.${extension}`;
 }
 
 // ============================================================
@@ -220,13 +209,12 @@ async function downloadBlobUrl(
   page?: string,
   downloadId?: string,
   chatName?: string,
-  timestamp?: string,
 ): Promise<void> {
   const blobs: Blob[] = [];
   let offset = 0;
   let totalSize: number | null = null;
   let extension = 'mp4';
-  let baseName = buildFileName(url, videoId, extension, chatName, timestamp);
+  let baseName = buildFileName(url, videoId, extension, chatName);
 
   const fetchNext = async (): Promise<void> => {
     const response = await fetchWithRetry(
@@ -298,7 +286,6 @@ async function downloadSegmented(
   page?: string,
   downloadId?: string,
   chatName?: string,
-  timestamp?: string,
 ): Promise<void> {
   // Probe: request 1 byte to learn total file size + content type
   const probeResp = await fetchWithRetry(url, { headers: { Range: 'bytes=0-0' } }, 'Probe');
@@ -315,7 +302,7 @@ async function downloadSegmented(
   const maxConcurrent = Math.max(1, Math.min(currentSettings.parallelChunks || 3, 5));
 
   const ext = contentType.split('/')[1] || 'mp4';
-  const fileName = buildFileName(url, videoId, ext, chatName, timestamp);
+  const fileName = buildFileName(url, videoId, ext, chatName);
 
   logger.info(
     `Download: ${numSegments} segs queued, ${formatBytes(contentSize)}, segSize=${formatBytes(segmentSize)}, concurrent=${maxConcurrent}`,
@@ -401,7 +388,7 @@ function formatBytes(bytes: number): string {
 // ============================================================
 
 async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
-  const { video_url, video_id, page, download_id, chat_name, timestamp } = src;
+  const { video_url, video_id, page, download_id, chat_name } = src;
   if (!video_url) return;
 
   if (activeDownloads.has(video_id) || completedDownloads.has(video_id)) {
@@ -427,9 +414,9 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
 
   try {
     if (resolvedUrl.startsWith('blob:')) {
-      await downloadBlobUrl(resolvedUrl, video_id, page, download_id, chat_name, timestamp);
+      await downloadBlobUrl(resolvedUrl, video_id, page, download_id, chat_name);
     } else {
-      await downloadSegmented(resolvedUrl, video_id, page, download_id, chat_name, timestamp);
+      await downloadSegmented(resolvedUrl, video_id, page, download_id, chat_name);
     }
     completedDownloads.add(video_id);
   } catch (error) {

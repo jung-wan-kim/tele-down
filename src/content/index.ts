@@ -143,9 +143,8 @@ function requestDownload(videoUrl: string, videoId: string): void {
     data: { videoId, downloadId, progress: 0, status: 'downloading', fileName: videoId },
   }).catch(() => {});
 
-  // Build filename prefix: [채팅방이름] 타임스탬프
+  // Build filename prefix: [채팅방이름]
   const chatName = getChatName();
-  const timestamp = item.timestamp || '';
 
   // Dispatch download request to injected script (content → page: detail works)
   document.dispatchEvent(
@@ -158,7 +157,6 @@ function requestDownload(videoUrl: string, videoId: string): void {
           page: window.location.href,
           download_id: downloadId,
           chat_name: chatName,
-          timestamp,
         },
       },
     }),
@@ -334,6 +332,22 @@ async function autoScrollAndDownload(): Promise<void> {
   scanAborted = false;
   scanProgress = 0;
   updateControlPanel(computePanelState());
+
+  // Wait for chat to fully load — Telegram renders messages lazily.
+  // If autoDownload triggers too early, scrollHeight === viewportHeight (no scroll).
+  let prevScrollHeight = scrollContainer.scrollHeight;
+  for (let waitAttempt = 0; waitAttempt < 10; waitAttempt++) {
+    await sleep(500);
+    const newHeight = scrollContainer.scrollHeight;
+    if (newHeight > prevScrollHeight + 50) {
+      prevScrollHeight = newHeight;
+      waitAttempt = 0; // still loading, reset wait counter
+    }
+  }
+
+  // Scroll to bottom to ensure we start from the newest messages
+  scrollContainer.scrollTop = scrollContainer.scrollHeight;
+  await sleep(500);
 
   const viewportHeight = scrollContainer.clientHeight;
   const scrollStep = Math.max(viewportHeight * 0.7, 200);
