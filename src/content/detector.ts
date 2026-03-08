@@ -300,23 +300,103 @@ export function tryGetVideoUrl(container: HTMLElement): string | null {
 }
 
 /**
- * Scroll a video container into view to trigger Telegram's lazy loading.
- * Returns a promise that resolves after a delay to allow src to be set.
+ * Trigger Telegram to load a video's stream URL by simulating user interaction.
+ *
+ * Telegram Web K does NOT set video.src on scroll alone — the user must click
+ * the video / play button. We:
+ * 1. Scroll into view
+ * 2. Click the video container (triggers Telegram's media player)
+ * 3. Poll for video.src to appear
+ * 4. Pause playback once we have the URL
  */
 export async function triggerVideoLoad(container: HTMLElement): Promise<string | null> {
-  // Find the bubble element to scroll to
   const bubble = container.closest<HTMLElement>('.bubble') ||
     container.closest<HTMLElement>('[data-message-id]') ||
     container;
 
-  // Scroll the bubble into view to trigger Telegram's lazy loading
-  // Do NOT save/restore scroll — let Telegram's IntersectionObserver detect the element
+  // Scroll into view
   bubble.scrollIntoView({ behavior: 'instant', block: 'center' });
+  await sleep(300);
 
-  // Wait for Telegram to detect intersection + fetch + set video src
-  await new Promise((r) => setTimeout(r, 1500));
+  // Find clickable target: play button or video/media container
+  const clickTarget =
+    bubble.querySelector<HTMLElement>('.btn-circle.video-play') ||
+    bubble.querySelector<HTMLElement>('.media-video') ||
+    bubble.querySelector<HTMLElement>('.media-container') ||
+    bubble.querySelector<HTMLElement>('video') ||
+    container;
 
-  return tryGetVideoUrl(container);
+  if (clickTarget) {
+    console.log(`[TeleDown] Clicking to trigger load: ${clickTarget.tagName}.${clickTarget.className.split(' ')[0]}`);
+    clickTarget.click();
+  }
+
+  // Poll for video src to appear (Telegram loads asynchronously via SW)
+  const maxWait = 5000;
+  const pollInterval = 200;
+  const start = Date.now();
+
+  while (Date.now() - start < maxWait) {
+    await sleep(pollInterval);
+
+    const url = tryGetVideoUrl(container);
+    if (url) {
+      // Pause the video — we only needed the URL
+      const video = container.querySelector<HTMLVideoElement>('video') ||
+        bubble.querySelector<HTMLVideoElement>('video');
+      if (video) {
+        video.pause();
+      }
+
+      // Close media viewer if it opened (Web K opens overlay on click)
+      const closeBtn = document.querySelector<HTMLElement>('.media-viewer-close') ||
+        document.querySelector<HTMLElement>('.btn-icon.media-viewer-close');
+      if (closeBtn) {
+        closeBtn.click();
+        await sleep(200);
+      }
+
+      return url;
+    }
+
+    // Also check if a media viewer opened with the video
+    const viewerVideo = document.querySelector<HTMLVideoElement>(
+      '.media-viewer-movers video, .media-viewer-aspecter video'
+    );
+    if (viewerVideo) {
+      const viewerUrl = getVideoUrlFromElement(viewerVideo);
+      if (viewerUrl) {
+        viewerVideo.pause();
+        // Close the viewer
+        const closeBtn = document.querySelector<HTMLElement>('.media-viewer-close') ||
+          document.querySelector<HTMLElement>('.btn-icon.media-viewer-close');
+        if (closeBtn) {
+          closeBtn.click();
+          await sleep(200);
+        }
+        return viewerUrl;
+      }
+    }
+  }
+
+  // Close any viewer that might have opened without giving us a URL
+  const closeBtn = document.querySelector<HTMLElement>('.media-viewer-close') ||
+    document.querySelector<HTMLElement>('.btn-icon.media-viewer-close');
+  if (closeBtn) {
+    closeBtn.click();
+  }
+
+  return null;
+}
+
+/** Extract URL from a video element (exported for use in triggerVideoLoad) */
+function getVideoUrlFromElement(video: HTMLVideoElement): string | null {
+  const url = getVideoUrl(video);
+  return isValidVideoUrl(url) ? url : null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ============================================================

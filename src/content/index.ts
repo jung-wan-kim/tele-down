@@ -156,22 +156,18 @@ function requestDownload(videoUrl: string, videoId: string): void {
   );
 }
 
-/** Try to resolve a single video's URL with retries and scrolling */
+/** Try to resolve a single video's URL by clicking to trigger Telegram's loader */
 async function resolveOneVideoUrl(item: QueueItem): Promise<string | null> {
   if (!item.containerElement) return null;
 
-  // Attempt 1: check if URL appeared since detection
+  // Quick check: maybe URL appeared since detection (e.g. user scrolled past it)
   let url = tryGetVideoUrl(item.containerElement);
   if (url) return url;
 
-  // Attempt 2-4: scroll into view and wait progressively longer
-  for (let attempt = 0; attempt < 3; attempt++) {
-    url = await triggerVideoLoad(item.containerElement);
-    if (url) return url;
-    await sleep(300); // extra wait between retries
-  }
-
-  return null;
+  // Click-to-load: triggers Telegram to fetch the video via MTProto
+  // triggerVideoLoad handles scrolling, clicking, polling, and cleanup
+  url = await triggerVideoLoad(item.containerElement);
+  return url;
 }
 
 /** Download all pending videos using a sliding-window concurrency model.
