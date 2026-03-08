@@ -104,10 +104,21 @@ function getVideoId(element: HTMLElement, _platform: TelegramPlatform): string {
   return `vid-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 }
 
+/** Get unique ID for the video currently showing in media viewer */
 function getMediaViewerVideoId(): string {
-  const hash = window.location.hash;
-  const hashMatch = hash.match(/(\d+)$/);
-  if (hashMatch) return `viewer-${hashMatch[1]}`;
+  // Use the video's file ID from stream URL (unique per video file)
+  const viewerVideo = document.querySelector<HTMLVideoElement>(
+    '.media-viewer-movers .media-viewer-aspecter video'
+  );
+  if (viewerVideo) {
+    const src = viewerVideo.getAttribute('src') || viewerVideo.src;
+    if (src) {
+      const fileId = extractFileIdFromUrl(src);
+      if (fileId) return `viewer-${fileId}`;
+    }
+  }
+
+  // Fallback: timestamp (unique per scan)
   return `viewer-${Date.now()}`;
 }
 
