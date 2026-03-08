@@ -51,6 +51,8 @@ interface SingleVideoSource {
   video_id: string;
   page?: string;
   download_id?: string;
+  chat_name?: string;
+  timestamp?: string;
 }
 
 // ============================================================
@@ -69,6 +71,8 @@ const logger = {
 // ============================================================
 
 const activeDownloads = new Set<string>();
+/** Track completed downloads to prevent re-downloading same video */
+const completedDownloads = new Set<string>();
 
 // ============================================================
 // URL Resolution
@@ -91,21 +95,43 @@ function resolveVideoUrl(url: string): string {
 // File Name
 // ============================================================
 
-function extractFileName(url: string, videoId: string, extension: string): string {
+/**
+ * Build filename: [채팅방이름] 타임스탬프_파일ID.ext
+ * e.g. "[개발채널] 20240301_1430_6138491001745972629.mp4"
+ */
+function buildFileName(
+  url: string,
+  videoId: string,
+  extension: string,
+  chatName?: string,
+  timestamp?: string,
+): string {
+  // Extract a short file ID from the stream URL or videoId
+  let fileId = videoId;
   try {
     if (url.includes('stream/')) {
       const encodedPart = url.substring(url.indexOf('stream/') + 7).split('?')[0];
       const parsed = JSON.parse(decodeURIComponent(encodedPart));
-      if (parsed?.fileName) return parsed.fileName;
-      if (parsed?.location?.id) return `${parsed.location.id}.${extension}`;
-    }
-    if (url.includes('progressive/')) {
-      const docPart = url.split('document').slice(1).join('');
-      if (docPart) return `${docPart}.${extension}`;
+      if (parsed?.location?.id) fileId = String(parsed.location.id);
+      // If Telegram provides a real filename, use it as-is with prefix
+      if (parsed?.fileName) {
+        const originalName = parsed.fileName;
+        const prefix = buildPrefix(chatName, timestamp);
+        return prefix ? `${prefix} ${originalName}` : originalName;
+      }
     }
   } catch { /* fallback */ }
-  if (videoId) return `${videoId}.${extension}`;
-  return `${Math.random().toString(36).substring(2, 10)}.${extension}`;
+
+  const prefix = buildPrefix(chatName, timestamp);
+  const baseName = `${fileId}.${extension}`;
+  return prefix ? `${prefix} ${baseName}` : baseName;
+}
+
+function buildPrefix(chatName?: string, timestamp?: string): string {
+  const parts: string[] = [];
+  if (chatName) parts.push(`[${chatName}]`);
+  if (timestamp) parts.push(timestamp);
+  return parts.join(' ');
 }
 
 // ============================================================
@@ -178,12 +204,14 @@ async function downloadBlobUrl(
   videoId: string,
   page?: string,
   downloadId?: string,
+  chatName?: string,
+  timestamp?: string,
 ): Promise<void> {
   const blobs: Blob[] = [];
   let offset = 0;
   let totalSize: number | null = null;
   let extension = 'mp4';
-  let baseName = extractFileName(url, videoId, extension);
+  let baseName = buildFileName(url, videoId, extension, chatName, timestamp);
 
   const fetchNext = async (): Promise<void> => {
     const response = await fetchWithRetry(
@@ -254,6 +282,8 @@ async function downloadSegmented(
   videoId: string,
   page?: string,
   downloadId?: string,
+  chatName?: string,
+  timestamp?: string,
 ): Promise<void> {
   // Probe: request 1 byte to learn total file size + content type
   const probeResp = await fetchWithRetry(url, { headers: { Range: 'bytes=0-0' } }, 'Probe');
@@ -270,7 +300,7 @@ async function downloadSegmented(
   const maxConcurrent = Math.max(1, Math.min(currentSettings.parallelChunks || 3, 5));
 
   const ext = contentType.split('/')[1] || 'mp4';
-  const fileName = extractFileName(url, videoId, ext);
+  const fileName = buildFileName(url, videoId, ext, chatName, timestamp);
 
   logger.info(
     `Download: ${numSegments} segs queued, ${formatBytes(contentSize)}, segSize=${formatBytes(segmentSize)}, concurrent=${maxConcurrent}`,
@@ -356,11 +386,11 @@ function formatBytes(bytes: number): string {
 // ============================================================
 
 async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
-  const { video_url, video_id, page, download_id } = src;
+  const { video_url, video_id, page, download_id, chat_name, timestamp } = src;
   if (!video_url) return;
 
-  if (activeDownloads.has(video_id)) {
-    logger.info(`Skipping duplicate download: ${video_id}`);
+  if (activeDownloads.has(video_id) || completedDownloads.has(video_id)) {
+    logger.info(`Skipping duplicate download: ${video_id} (${completedDownloads.has(video_id) ? 'already completed' : 'in progress'})`);
     return;
   }
   activeDownloads.add(video_id);
@@ -369,10 +399,11 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
 
   try {
     if (resolvedUrl.startsWith('blob:')) {
-      await downloadBlobUrl(resolvedUrl, video_id, page, download_id);
+      await downloadBlobUrl(resolvedUrl, video_id, page, download_id, chat_name, timestamp);
     } else {
-      await downloadSegmented(resolvedUrl, video_id, page, download_id);
+      await downloadSegmented(resolvedUrl, video_id, page, download_id, chat_name, timestamp);
     }
+    completedDownloads.add(video_id);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error(msg, video_id);

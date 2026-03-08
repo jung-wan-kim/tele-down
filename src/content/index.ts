@@ -11,7 +11,7 @@
  * 7. Chat navigation detection (URL change)
  */
 
-import { startWatching, clearSeenVideos, tryGetVideoUrl, triggerVideoLoad, scanForVideos, type DetectedVideo } from './detector';
+import { startWatching, clearSeenVideos, tryGetVideoUrl, triggerVideoLoad, scanForVideos, getChatName, type DetectedVideo } from './detector';
 import {
   injectDownloadButtons,
   setDownloadHandler,
@@ -39,6 +39,8 @@ interface QueueItem {
   progress: number;
   /** Reference to the DOM container for URL resolution */
   containerElement?: HTMLElement;
+  /** Message timestamp for filename */
+  timestamp?: string;
 }
 
 /** All detected videos for the current chat */
@@ -140,6 +142,10 @@ function requestDownload(videoUrl: string, videoId: string): void {
     data: { videoId, downloadId, progress: 0, status: 'downloading', fileName: videoId },
   }).catch(() => {});
 
+  // Build filename prefix: [채팅방이름] 타임스탬프
+  const chatName = getChatName();
+  const timestamp = item.timestamp || '';
+
   // Dispatch download request to injected script (content → page: detail works)
   document.dispatchEvent(
     new CustomEvent('video_download', {
@@ -150,6 +156,8 @@ function requestDownload(videoUrl: string, videoId: string): void {
           video_id: videoId,
           page: window.location.href,
           download_id: downloadId,
+          chat_name: chatName,
+          timestamp,
         },
       },
     }),
@@ -490,6 +498,7 @@ function onVideosDetected(videos: DetectedVideo[]): void {
         status: 'pending',
         progress: 0,
         containerElement: video.containerElement,
+        timestamp: video.timestamp,
       });
       newlyAdded++;
     } else if (!existing.videoUrl && video.videoUrl) {

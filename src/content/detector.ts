@@ -30,6 +30,8 @@ export interface DetectedVideo {
   source?: string;
   /** Video duration in seconds (parsed from .video-time element) */
   durationSeconds?: number;
+  /** Message timestamp text (e.g. "14:30", "2024.12.01 14:30") */
+  timestamp?: string;
 }
 
 // ============================================================
@@ -121,6 +123,73 @@ export function clearSeenVideos(): void {
 }
 
 // ============================================================
+// Chat Name Extraction
+// ============================================================
+
+/** Extract current chat/channel name from Telegram Web K or A */
+export function getChatName(): string {
+  // Web K: .chat-info .peer-title, or top bar title
+  const kTitle =
+    document.querySelector<HTMLElement>('.chat-info .peer-title') ||
+    document.querySelector<HTMLElement>('.top .peer-title') ||
+    document.querySelector<HTMLElement>('.chat-info-container .peer-title');
+  if (kTitle?.textContent?.trim()) return sanitizeFileName(kTitle.textContent.trim());
+
+  // Web A: .chat-title, .ChatInfo .title
+  const aTitle =
+    document.querySelector<HTMLElement>('.chat-title') ||
+    document.querySelector<HTMLElement>('.ChatInfo .title');
+  if (aTitle?.textContent?.trim()) return sanitizeFileName(aTitle.textContent.trim());
+
+  return 'Unknown';
+}
+
+/** Remove characters invalid for file names */
+function sanitizeFileName(name: string): string {
+  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim();
+}
+
+// ============================================================
+// Timestamp Extraction
+// ============================================================
+
+/** Extract message timestamp from a bubble/message element */
+function parseMessageTimestamp(element: HTMLElement): string | undefined {
+  // Web K: .time .i18n or .time inner-text (e.g. "14:30")
+  const timeEl =
+    element.querySelector<HTMLElement>('.time .i18n') ||
+    element.querySelector<HTMLElement>('.message-time') ||
+    element.querySelector<HTMLElement>('.time');
+  if (!timeEl) return undefined;
+
+  // Get the time text, ignoring nested elements like status icons
+  const text = timeEl.getAttribute('data-timestamp')
+    || timeEl.textContent?.trim()
+    || undefined;
+
+  if (!text) return undefined;
+
+  // If it's a unix timestamp attribute, convert
+  const asNum = Number(text);
+  if (!isNaN(asNum) && asNum > 1_000_000_000) {
+    const d = new Date(asNum * 1000);
+    return formatTimestamp(d);
+  }
+
+  // Text like "14:30" — combine with today's date
+  if (/^\d{1,2}:\d{2}/.test(text)) {
+    return text.replace(/:/g, '');
+  }
+
+  return text.replace(/[:/]/g, '').replace(/\s+/g, '_');
+}
+
+function formatTimestamp(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+// ============================================================
 // Duration Parsing
 // ============================================================
 
@@ -179,6 +248,7 @@ function scanVideoContainers(platform: TelegramPlatform): DetectedVideo[] {
         containerElement: container,
         source: 'chat',
         durationSeconds: parseVideoDuration(bubble),
+        timestamp: parseMessageTimestamp(bubble),
       });
     });
   }
@@ -209,6 +279,7 @@ function scanVideoContainers(platform: TelegramPlatform): DetectedVideo[] {
         containerElement: container,
         source: 'chat',
         durationSeconds: parseVideoDuration(msg),
+        timestamp: parseMessageTimestamp(msg),
       });
     });
   }
