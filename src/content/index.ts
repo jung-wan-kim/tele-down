@@ -218,6 +218,8 @@ function injectDownloaderScript(): void {
 const MIN_DURATION_SECONDS = 60;
 
 function onVideosDetected(videos: DetectedVideo[]): void {
+  let newCount = 0;
+
   for (const video of videos) {
     // Skip videos shorter than 1 minute
     if (video.durationSeconds !== undefined && video.durationSeconds < MIN_DURATION_SECONDS) {
@@ -233,6 +235,7 @@ function onVideosDetected(videos: DetectedVideo[]): void {
         progress: 0,
         containerElement: video.containerElement,
       });
+      newCount++;
     } else {
       if (!existing.videoUrl && video.videoUrl) {
         existing.videoUrl = video.videoUrl;
@@ -244,8 +247,12 @@ function onVideosDetected(videos: DetectedVideo[]): void {
     }
   }
 
-  // Inject download buttons for ALL detected videos (not just ones with URLs)
-  // URL will be resolved on-demand when button is clicked
+  if (newCount > 0) {
+    console.log(`[TeleDown] ${newCount} new video(s) detected (total: ${videoQueue.size})`);
+  }
+
+  // Inject download buttons for ALL detected videos (including re-detected ones
+  // whose DOM containers may have been recycled by Telegram's virtual scroll)
   const longVideos = videos.filter(
     (v) => v.durationSeconds === undefined || v.durationSeconds >= MIN_DURATION_SECONDS,
   );

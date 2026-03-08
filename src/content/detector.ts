@@ -112,14 +112,12 @@ function getMediaViewerVideoId(): string {
 }
 
 // ============================================================
-// Deduplication
+// Deduplication (handled by caller via videoQueue)
 // ============================================================
 
-const seenVideoIds = new Set<string>();
-
-/** Clear seen video IDs (call on chat change) */
+/** No-op — dedup is now handled by index.ts videoQueue */
 export function clearSeenVideos(): void {
-  seenVideoIds.clear();
+  // intentionally empty
 }
 
 // ============================================================
@@ -226,8 +224,6 @@ function scanVideoContainers(platform: TelegramPlatform): DetectedVideo[] {
       if (!hasVideoTime && !hasVideo && !hasMediaVideo && !hasRoundVideo) return;
 
       const videoId = getVideoId(bubble, platform);
-      if (seenVideoIds.has(videoId)) return;
-      seenVideoIds.add(videoId);
 
       // Try to get video URL if video element exists
       const videoEl = bubble.querySelector<HTMLVideoElement>('video');
@@ -263,8 +259,6 @@ function scanVideoContainers(platform: TelegramPlatform): DetectedVideo[] {
       if (!hasVideo && !hasVideoTime && !hasMediaVideo) return;
 
       const videoId = getVideoId(msg, platform);
-      if (seenVideoIds.has(videoId)) return;
-      seenVideoIds.add(videoId);
 
       const videoEl = msg.querySelector<HTMLVideoElement>('video');
       const url = videoEl ? getVideoUrl(videoEl) : null;
@@ -304,10 +298,7 @@ function scanMediaViewer(): DetectedVideo[] {
       const container = kViewerVideo.closest<HTMLElement>('.media-viewer-aspecter') ||
         kViewerVideo.parentElement!;
       const videoId = getMediaViewerVideoId();
-      if (!seenVideoIds.has(videoId)) {
-        seenVideoIds.add(videoId);
-        detected.push({ videoId, videoUrl: url, containerElement: container, source: 'viewer' });
-      }
+      detected.push({ videoId, videoUrl: url, containerElement: container, source: 'viewer' });
     }
   }
 
@@ -317,10 +308,7 @@ function scanMediaViewer(): DetectedVideo[] {
     if (isValidVideoUrl(url)) {
       const container = video.closest<HTMLElement>('.MediaViewerSlide--active') || video.parentElement!;
       const videoId = getMediaViewerVideoId();
-      if (!seenVideoIds.has(videoId)) {
-        seenVideoIds.add(videoId);
-        detected.push({ videoId, videoUrl: url, containerElement: container, source: 'viewer' });
-      }
+      detected.push({ videoId, videoUrl: url, containerElement: container, source: 'viewer' });
     }
   });
 
@@ -344,10 +332,7 @@ function scanStoriesViewer(): DetectedVideo[] {
           video.closest<HTMLElement>('#StoryViewer') ||
           video.parentElement!;
         const videoId = `story-${Date.now()}`;
-        if (!seenVideoIds.has(videoId)) {
-          seenVideoIds.add(videoId);
-          detected.push({ videoId, videoUrl: url, containerElement: container, source: 'story' });
-        }
+        detected.push({ videoId, videoUrl: url, containerElement: container, source: 'story' });
       }
     });
   }
@@ -538,9 +523,8 @@ export function scanForVideos(): DetectedVideo[] {
   // 3. Stories viewer
   allDetected.push(...scanStoriesViewer());
 
-  if (allDetected.length > 0) {
-    console.log(`[TeleDown] Detected ${allDetected.length} video(s) [platform: ${platform}]`);
-  }
+  // Log only on first detection (avoid spam from periodic rescan)
+
 
   return allDetected;
 }
