@@ -41,7 +41,11 @@ interface QueueItem {
   containerElement?: HTMLElement;
   /** Message timestamp for filename */
   timestamp?: string;
+  /** Number of URL resolve attempts (error only after MAX_RESOLVE_RETRIES) */
+  resolveAttempts?: number;
 }
+
+const MAX_RESOLVE_RETRIES = 2;
 
 /** All detected videos for the current chat */
 const videoQueue = new Map<string, QueueItem>();
@@ -171,17 +175,28 @@ function requestDownload(videoUrl: string, videoId: string): void {
 async function resolveOneVideoUrl(item: QueueItem): Promise<string | null> {
   // Fast path: container still in DOM
   if (item.containerElement?.isConnected) {
+    console.log(`[TeleDown] [${item.videoId}] container connected, trying direct resolve`);
     const url = tryGetVideoUrl(item.containerElement);
     if (url) return url;
-    return await triggerVideoLoad(item.containerElement);
+    const loadedUrl = await triggerVideoLoad(item.containerElement);
+    if (loadedUrl) return loadedUrl;
+    // triggerVideoLoad failed with connected container — DOM might be stale
+    // Clear reference so next attempt uses scrollToBubble
+    console.log(`[TeleDown] [${item.videoId}] triggerVideoLoad failed, clearing container ref`);
+    item.containerElement = undefined;
+    return null;
   }
 
   // Container detached (virtual scroll removed it) — scroll to re-find
+  console.log(`[TeleDown] [${item.videoId}] container disconnected, using scrollToBubble`);
   const scrollContainer = getScrollContainer();
   if (!scrollContainer) return null;
 
   const bubble = await scrollToBubble(item.videoId, scrollContainer);
-  if (!bubble) return null;
+  if (!bubble) {
+    console.log(`[TeleDown] [${item.videoId}] scrollToBubble returned null`);
+    return null;
+  }
 
   // Update container reference to the live DOM element
   const container =
@@ -228,37 +243,62 @@ async function startAllPendingDownloads(): Promise<void> {
       const needResolve = Array.from(videoQueue.values()).filter(
         (v) => v.status === 'pending' && !v.videoUrl && !processedIds.has(v.videoId),
       );
+      // Also pick up items that failed but haven't exhausted retries
+      const retryable = Array.from(videoQueue.values()).filter(
+        (v) => v.status === 'error' && !v.videoUrl
+          && (v.resolveAttempts || 0) < MAX_RESOLVE_RETRIES
+          && !processedIds.has(v.videoId),
+      );
+      const allToResolve = [...needResolve, ...retryable];
 
-      if (needResolve.length === 0) break;
+      if (allToResolve.length === 0) break;
 
       pass++;
       // Sort by message ID ascending (oldest → newest = top → bottom)
-      needResolve.sort((a, b) => {
+      allToResolve.sort((a, b) => {
         const midA = parseInt(a.videoId.replace(/^[ka]-/, ''), 10) || 0;
         const midB = parseInt(b.videoId.replace(/^[ka]-/, ''), 10) || 0;
         return midA - midB;
       });
 
-      const totalPending = Array.from(videoQueue.values()).filter(v => v.status === 'pending').length;
+      const totalPending = Array.from(videoQueue.values()).filter(v => v.status === 'pending' || v.status === 'error').length;
+      const retryCount = retryable.length;
       console.log(
-        `[TeleDown] Phase 1 pass ${pass}: ${needResolve.length} to resolve (total pending: ${totalPending})`,
+        `[TeleDown] Phase 1 pass ${pass}: ${needResolve.length} new + ${retryCount} retry (total unresolved: ${totalPending})`,
       );
 
-      for (const item of needResolve) {
+      for (const item of allToResolve) {
         processedIds.add(item.videoId);
-        if (item.videoUrl || item.status !== 'pending') continue;
+        if (item.videoUrl) continue;
+        // Reset error status for retry
+        if (item.status === 'error') {
+          item.status = 'pending';
+          console.log(`[TeleDown] [${item.videoId}] retrying (attempt ${(item.resolveAttempts || 0) + 1}/${MAX_RESOLVE_RETRIES})`);
+        }
+        if (item.status !== 'pending') continue;
 
         console.log(`[TeleDown] [${item.videoId}] resolving URL...`);
         const url = await resolveOneVideoUrl(item);
         if (url) {
           item.videoUrl = url;
+          item.resolveAttempts = 0;
           totalResolved++;
           console.log(`[TeleDown] [${item.videoId}] URL resolved`);
         } else {
-          console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED, marking as error`);
-          item.status = 'error';
-          updateButtonError(item.videoId);
+          const attempts = (item.resolveAttempts || 0) + 1;
+          item.resolveAttempts = attempts;
+          if (attempts >= MAX_RESOLVE_RETRIES) {
+            console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED after ${attempts} attempts, marking as error`);
+            item.status = 'error';
+            updateButtonError(item.videoId);
+          } else {
+            console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED (attempt ${attempts}/${MAX_RESOLVE_RETRIES}), will retry`);
+            item.status = 'error'; // temporarily error, picked up by retryable filter next pass
+          }
         }
+
+        // Brief DOM stabilization after each resolve attempt
+        await sleep(200);
 
         // Opportunistic: while scrolled here, check other pending items in DOM
         for (const [, other] of videoQueue) {
