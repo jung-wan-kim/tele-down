@@ -238,51 +238,95 @@ async function resolveVideoUrls(): Promise<void> {
   }
 }
 
-/** Download all pending videos (respects parallelDownloads & downloadQueue settings) */
+/** Download all pending videos using a sliding-window concurrency model.
+ *  Instead of batch-then-wait, starts a new download whenever a slot frees up. */
 async function startAllPendingDownloads(): Promise<void> {
   // First, resolve URLs for videos that don't have one yet
   await resolveVideoUrls();
 
-  let pending = Array.from(videoQueue.values()).filter(
+  const pending = Array.from(videoQueue.values()).filter(
     (v) => v.status === 'pending' && v.videoUrl,
   );
   if (pending.length === 0) return;
 
-  // Limit to downloadQueue size
-  const maxQueue = Math.max(1, settings.downloadQueue || 500);
-  if (pending.length > maxQueue) {
-    console.log(`[TeleDown] Queue limit: ${pending.length} → ${maxQueue}`);
-    pending = pending.slice(0, maxQueue);
-  }
+  const maxParallel = Math.max(1, Math.min(settings.parallelDownloads || 2, 5));
+  console.log(`[TeleDown] Starting ${pending.length} downloads (${maxParallel} parallel)`);
 
-  const maxParallel = Math.max(1, settings.parallelDownloads || 3);
-  console.log(`[TeleDown] Starting ${pending.length} downloads (${maxParallel} parallel, queue=${maxQueue})`);
+  // Sliding-window: maintain up to maxParallel concurrent downloads
+  let nextIdx = 0;
+  let activeCount = 0;
 
-  // Download in parallel batches of parallelDownloads
-  for (let i = 0; i < pending.length; i += maxParallel) {
-    const batch = pending.slice(i, i + maxParallel);
-    batch.forEach((item) => requestDownload(item.videoUrl, item.videoId));
-
-    // Wait for current batch to finish before starting next
-    if (i + maxParallel < pending.length) {
-      // Wait until batch items are no longer 'downloading'
-      await waitForBatchComplete(batch.map((b) => b.videoId));
+  return new Promise<void>((resolveAll) => {
+    function onSlotFreed(): void {
+      activeCount--;
+      // Start next item(s) to fill available slots
+      fillSlots();
+      // All done?
+      if (activeCount === 0 && nextIdx >= pending.length) {
+        resolveAll();
+      }
     }
-  }
+
+    function fillSlots(): void {
+      while (activeCount < maxParallel && nextIdx < pending.length) {
+        const item = pending[nextIdx++];
+        // Skip if no longer pending (may have been downloaded by user click)
+        if (item.status !== 'pending' || !item.videoUrl) {
+          continue;
+        }
+        activeCount++;
+        startTrackedDownload(item.videoUrl, item.videoId, onSlotFreed);
+      }
+    }
+
+    fillSlots();
+
+    // Safety: if nothing was started (all skipped), resolve immediately
+    if (activeCount === 0) resolveAll();
+  });
 }
 
-/** Wait until none of the given videoIds are in 'downloading' status */
-async function waitForBatchComplete(videoIds: string[]): Promise<void> {
-  const maxWait = 600000; // 10 min timeout
-  const start = Date.now();
-  while (Date.now() - start < maxWait) {
-    const stillDownloading = videoIds.some((id) => {
-      const item = videoQueue.get(id);
-      return item?.status === 'downloading';
-    });
-    if (!stillDownloading) return;
-    await new Promise((r) => setTimeout(r, 1000));
+/** Start a download and call onDone when it completes, errors, or times out */
+function startTrackedDownload(
+  videoUrl: string,
+  videoId: string,
+  onDone: () => void,
+): void {
+  const PER_VIDEO_TIMEOUT = 300000; // 5 min per video max
+  let settled = false;
+
+  function settle(): void {
+    if (settled) return;
+    settled = true;
+    onDone();
   }
+
+  // Timeout fallback: if no progress/error event comes, free the slot
+  const timer = setTimeout(() => {
+    if (!settled) {
+      console.warn(`[TeleDown] Timeout for ${videoId}, freeing slot`);
+      const item = videoQueue.get(videoId);
+      if (item && item.status === 'downloading') {
+        item.status = 'error';
+        videoQueue.set(videoId, item);
+        updateButtonError(videoId);
+        updateControlPanel(computePanelState());
+      }
+      settle();
+    }
+  }, PER_VIDEO_TIMEOUT);
+
+  // Watch for completion or error via status changes
+  const checkInterval = setInterval(() => {
+    const item = videoQueue.get(videoId);
+    if (!item || item.status === 'completed' || item.status === 'error') {
+      clearInterval(checkInterval);
+      clearTimeout(timer);
+      settle();
+    }
+  }, 500);
+
+  requestDownload(videoUrl, videoId);
 }
 
 // ============================================================
