@@ -73,6 +73,21 @@ const logger = {
 const activeDownloads = new Set<string>();
 /** Track completed downloads to prevent re-downloading same video */
 const completedDownloads = new Set<string>();
+/** Track downloaded FILE IDs (from stream URL) — prevents downloading the same file
+ *  even when sent in different messages (different video_id but same file). */
+const downloadedFileIds = new Set<string>();
+
+/** Extract the document file ID from a Telegram stream URL */
+function extractFileId(url: string): string | null {
+  try {
+    if (!url.includes('stream/')) return null;
+    const encoded = url.substring(url.indexOf('stream/') + 7).split('?')[0];
+    const parsed = JSON.parse(decodeURIComponent(encoded));
+    return parsed?.location?.id ? String(parsed.location.id) : null;
+  } catch {
+    return null;
+  }
+}
 
 // ============================================================
 // URL Resolution
@@ -393,9 +408,20 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
     logger.info(`Skipping duplicate download: ${video_id} (${completedDownloads.has(video_id) ? 'already completed' : 'in progress'})`);
     return;
   }
-  activeDownloads.add(video_id);
 
   const resolvedUrl = resolveVideoUrl(video_url);
+
+  // Dedup by file ID — same file in different messages should only download once
+  const fileId = extractFileId(resolvedUrl);
+  if (fileId && downloadedFileIds.has(fileId)) {
+    logger.info(`Skipping duplicate file: ${video_id} (fileId=${fileId} already downloaded)`);
+    // Notify content script that this "completed" so the queue doesn't stall
+    dispatchProgress(video_id, 100, page, download_id);
+    completedDownloads.add(video_id);
+    return;
+  }
+
+  activeDownloads.add(video_id);
 
   try {
     if (resolvedUrl.startsWith('blob:')) {
@@ -404,6 +430,7 @@ async function handleSingleDownload(src: SingleVideoSource): Promise<void> {
       await downloadSegmented(resolvedUrl, video_id, page, download_id, chat_name, timestamp);
     }
     completedDownloads.add(video_id);
+    if (fileId) downloadedFileIds.add(fileId);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error(msg, video_id);

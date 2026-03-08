@@ -258,6 +258,18 @@ async function startAllPendingDownloads(): Promise<void> {
           } else {
             console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED, skipping`);
           }
+
+          // Opportunistic: while scrolled here, check other pending items in DOM
+          for (const [, other] of videoQueue) {
+            if (other.status !== 'pending' || other.videoUrl) continue;
+            if (!other.containerElement?.isConnected) continue;
+            const otherUrl = tryGetVideoUrl(other.containerElement);
+            if (otherUrl) {
+              other.videoUrl = otherUrl;
+              resolved++;
+              console.log(`[TeleDown] [${other.videoId}] URL resolved (opportunistic)`);
+            }
+          }
         }
 
         console.log(`[TeleDown] Phase 1 complete: ${resolved}/${withoutUrl} URLs resolved`);
@@ -271,16 +283,27 @@ async function startAllPendingDownloads(): Promise<void> {
       }
 
       // ── Phase 2: Download with sliding window concurrency ──
-      const readyToDownload = Array.from(videoQueue.values()).filter(
-        (v) => v.status === 'pending' && v.videoUrl,
-      );
+      // Dedup: same stream URL = same file, download only first occurrence
+      const seenUrls = new Set<string>();
+      const readyToDownload: QueueItem[] = [];
+      for (const item of Array.from(videoQueue.values())) {
+        if (item.status !== 'pending' || !item.videoUrl) continue;
+        if (seenUrls.has(item.videoUrl)) {
+          item.status = 'completed';
+          console.log(`[TeleDown] [${item.videoId}] skipped (duplicate URL)`);
+          continue;
+        }
+        seenUrls.add(item.videoUrl);
+        readyToDownload.push(item);
+      }
+      updateControlPanel(computePanelState());
 
       if (readyToDownload.length === 0) {
         console.log('[TeleDown] No videos ready to download');
         break;
       }
 
-      console.log(`[TeleDown] Phase 2: Downloading ${readyToDownload.length} videos...`);
+      console.log(`[TeleDown] Phase 2: Downloading ${readyToDownload.length} unique videos...`);
 
       let nextIdx = 0;
       let activeCount = 0;
@@ -589,11 +612,23 @@ async function scrollToBubble(
       return el;
     }
 
-    // Boundary: hit top
+    // Boundary: hit top — wait for Telegram to load older messages
     if (direction < 0 && scrollContainer.scrollTop <= 0) {
-      await sleep(800);
-      el = document.querySelector<HTMLElement>(selector);
-      if (el?.isConnected) return el;
+      const prevHeight = scrollContainer.scrollHeight;
+      for (let retry = 0; retry < 3; retry++) {
+        await sleep(1000);
+        el = document.querySelector<HTMLElement>(selector);
+        if (el?.isConnected) {
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          await sleep(300);
+          return el;
+        }
+        // If Telegram loaded more history (scrollHeight grew), keep trying
+        if (scrollContainer.scrollHeight > prevHeight + 100) {
+          scrollContainer.scrollTop = 0; // Stay at top to load more
+          continue;
+        }
+      }
       break;
     }
     // Boundary: hit bottom
