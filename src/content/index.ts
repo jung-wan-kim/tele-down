@@ -212,101 +212,110 @@ async function startAllPendingDownloads(): Promise<void> {
   isProcessing = true;
 
   try {
-    const pending = Array.from(videoQueue.values()).filter(
-      (v) => v.status === 'pending',
-    );
-    if (pending.length === 0) {
-      console.log('[TeleDown] No pending videos to download');
-      return;
-    }
-
-    // Sort by message ID ascending (oldest → newest = top → bottom of chat)
-    // so that scroll-based resolution moves in one direction only.
-    pending.sort((a, b) => {
-      const midA = parseInt(a.videoId.replace(/^[ka]-/, ''), 10) || 0;
-      const midB = parseInt(b.videoId.replace(/^[ka]-/, ''), 10) || 0;
-      return midA - midB;
-    });
-
-    const withUrl = pending.filter((v) => v.videoUrl).length;
-    const withoutUrl = pending.length - withUrl;
     const maxParallel = Math.max(1, Math.min(settings.parallelDownloads || 2, 5));
-    console.log(
-      `[TeleDown] Queue: ${pending.length} pending (${withUrl} with URL, ${withoutUrl} need resolve), parallel=${maxParallel}`,
-    );
+    const MAX_ROUNDS = 3; // Repeat to pick up videos detected during processing
 
-    // ── Phase 1: Resolve URLs by scrolling to each message ──
-    if (withoutUrl > 0) {
-      console.log(`[TeleDown] Phase 1: Resolving ${withoutUrl} URLs by scrolling...`);
-      let resolved = 0;
-
-      for (const item of pending) {
-        if (item.videoUrl || item.status !== 'pending') continue;
-
-        console.log(`[TeleDown] [${item.videoId}] resolving URL...`);
-        const url = await resolveOneVideoUrl(item);
-        if (url) {
-          item.videoUrl = url;
-          resolved++;
-          console.log(`[TeleDown] [${item.videoId}] URL resolved`);
-        } else {
-          console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED, skipping`);
-        }
+    for (let round = 1; round <= MAX_ROUNDS; round++) {
+      const pending = Array.from(videoQueue.values()).filter(
+        (v) => v.status === 'pending',
+      );
+      if (pending.length === 0) {
+        if (round === 1) console.log('[TeleDown] No pending videos to download');
+        break;
       }
 
-      console.log(`[TeleDown] Phase 1 complete: ${resolved}/${withoutUrl} URLs resolved`);
-    }
+      // Sort by message ID ascending (oldest → newest = top → bottom of chat)
+      pending.sort((a, b) => {
+        const midA = parseInt(a.videoId.replace(/^[ka]-/, ''), 10) || 0;
+        const midB = parseInt(b.videoId.replace(/^[ka]-/, ''), 10) || 0;
+        return midA - midB;
+      });
 
-    // Scroll back to bottom (natural chat position)
-    const sc = getScrollContainer();
-    if (sc) {
-      sc.scrollTop = sc.scrollHeight;
-      await sleep(500);
-    }
+      const withUrl = pending.filter((v) => v.videoUrl).length;
+      const withoutUrl = pending.length - withUrl;
 
-    // ── Phase 2: Download with sliding window concurrency ──
-    const readyToDownload = Array.from(videoQueue.values()).filter(
-      (v) => v.status === 'pending' && v.videoUrl,
-    );
+      if (round > 1) {
+        console.log(`[TeleDown] Round ${round}: ${pending.length} new pending videos found`);
+      }
+      console.log(
+        `[TeleDown] Queue: ${pending.length} pending (${withUrl} with URL, ${withoutUrl} need resolve), parallel=${maxParallel}`,
+      );
 
-    if (readyToDownload.length === 0) {
-      console.log('[TeleDown] No videos ready to download');
-      return;
-    }
+      // ── Phase 1: Resolve URLs by scrolling to each message ──
+      if (withoutUrl > 0) {
+        console.log(`[TeleDown] Phase 1: Resolving ${withoutUrl} URLs by scrolling...`);
+        let resolved = 0;
 
-    console.log(`[TeleDown] Phase 2: Downloading ${readyToDownload.length} videos...`);
+        for (const item of pending) {
+          if (item.videoUrl || item.status !== 'pending') continue;
 
-    let nextIdx = 0;
-    let activeCount = 0;
-    let completedCount = 0;
+          console.log(`[TeleDown] [${item.videoId}] resolving URL...`);
+          const url = await resolveOneVideoUrl(item);
+          if (url) {
+            item.videoUrl = url;
+            resolved++;
+            console.log(`[TeleDown] [${item.videoId}] URL resolved`);
+          } else {
+            console.warn(`[TeleDown] [${item.videoId}] URL resolve FAILED, skipping`);
+          }
+        }
 
-    await new Promise<void>((resolveAll) => {
-      function onSlotFreed(): void {
-        activeCount--;
+        console.log(`[TeleDown] Phase 1 complete: ${resolved}/${withoutUrl} URLs resolved`);
+      }
+
+      // Scroll back to bottom (natural chat position)
+      const sc = getScrollContainer();
+      if (sc) {
+        sc.scrollTop = sc.scrollHeight;
+        await sleep(500);
+      }
+
+      // ── Phase 2: Download with sliding window concurrency ──
+      const readyToDownload = Array.from(videoQueue.values()).filter(
+        (v) => v.status === 'pending' && v.videoUrl,
+      );
+
+      if (readyToDownload.length === 0) {
+        console.log('[TeleDown] No videos ready to download');
+        break;
+      }
+
+      console.log(`[TeleDown] Phase 2: Downloading ${readyToDownload.length} videos...`);
+
+      let nextIdx = 0;
+      let activeCount = 0;
+      let completedCount = 0;
+
+      await new Promise<void>((resolveAll) => {
+        function onSlotFreed(): void {
+          activeCount--;
+          fillSlots();
+          if (activeCount === 0 && nextIdx >= readyToDownload.length) {
+            console.log(`[TeleDown] All downloads complete: ${completedCount} started`);
+            resolveAll();
+          }
+        }
+
+        function fillSlots(): void {
+          while (activeCount < maxParallel && nextIdx < readyToDownload.length) {
+            const item = readyToDownload[nextIdx++];
+            if (item.status !== 'pending') continue;
+
+            activeCount++;
+            completedCount++;
+            console.log(
+              `[TeleDown] [${item.videoId}] starting download (active=${activeCount}, remaining=${readyToDownload.length - nextIdx})`,
+            );
+            startTrackedDownload(item.videoUrl, item.videoId, onSlotFreed);
+          }
+        }
+
         fillSlots();
-        if (activeCount === 0 && nextIdx >= readyToDownload.length) {
-          console.log(`[TeleDown] All downloads complete: ${completedCount} started`);
-          resolveAll();
-        }
-      }
+        if (activeCount === 0 && nextIdx >= readyToDownload.length) resolveAll();
+      });
 
-      function fillSlots(): void {
-        while (activeCount < maxParallel && nextIdx < readyToDownload.length) {
-          const item = readyToDownload[nextIdx++];
-          if (item.status !== 'pending') continue;
-
-          activeCount++;
-          completedCount++;
-          console.log(
-            `[TeleDown] [${item.videoId}] starting download (active=${activeCount}, remaining=${readyToDownload.length - nextIdx})`,
-          );
-          startTrackedDownload(item.videoUrl, item.videoId, onSlotFreed);
-        }
-      }
-
-      fillSlots();
-      if (activeCount === 0 && nextIdx >= readyToDownload.length) resolveAll();
-    });
+      // Check if new videos were detected during this round
+    }
   } finally {
     isProcessing = false;
   }
