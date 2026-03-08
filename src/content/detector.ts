@@ -403,12 +403,25 @@ export async function triggerVideoLoad(container: HTMLElement): Promise<string |
     container.closest<HTMLElement>('[data-message-id]') ||
     container;
 
+  // Close any existing media viewer first to prevent URL confusion
+  // (previous video's stream URL could be mistaken for this video's)
+  const existingViewer = document.querySelector('.media-viewer-whole');
+  if (existingViewer) {
+    closeMediaViewer();
+    await sleep(500);
+  }
+
+  // Remember any existing stream URLs so we only accept NEW ones
+  const existingStreamUrls = new Set<string>();
+  document.querySelectorAll<HTMLVideoElement>('video[src*="stream/"]').forEach((v) => {
+    if (v.src) existingStreamUrls.add(v.src);
+  });
+
   // Scroll into view
   bubble.scrollIntoView({ behavior: 'instant', block: 'center' });
   await sleep(300);
 
   // Prefer .media-container (opens media viewer in Web K) over the play button.
-  // The play button only handles inline play and may not trigger the viewer.
   const clickTarget =
     bubble.querySelector<HTMLElement>('.media-container') ||
     bubble.querySelector<HTMLElement>('.media-video') ||
@@ -417,7 +430,7 @@ export async function triggerVideoLoad(container: HTMLElement): Promise<string |
     container;
 
   if (clickTarget) {
-    console.log(`[TeleDown] simulateClick: ${clickTarget.tagName}.${clickTarget.className?.split(' ')[0] || '?'} at (${Math.round(clickTarget.getBoundingClientRect().left)},${Math.round(clickTarget.getBoundingClientRect().top)})`);
+    console.log(`[TeleDown] simulateClick: ${clickTarget.tagName}.${clickTarget.className?.split(' ')[0] || '?'}`);
     simulateClick(clickTarget);
   }
 
@@ -436,26 +449,24 @@ export async function triggerVideoLoad(container: HTMLElement): Promise<string |
     );
     if (viewerVideo) {
       const viewerUrl = getVideoUrlFromElement(viewerVideo);
-      if (viewerUrl) {
-        // Keep media viewer open — user can watch while downloading
-        console.log(`[TeleDown] Got stream URL from media viewer (keeping popup open)`);
+      if (viewerUrl && !existingStreamUrls.has(viewerUrl)) {
+        console.log(`[TeleDown] Got NEW stream URL from media viewer`);
         return viewerUrl;
       }
     }
 
-    // Check 2: any video with stream URL anywhere in document
-    const streamVideo = document.querySelector<HTMLVideoElement>('video[src*="stream/"]');
-    if (streamVideo) {
-      const streamUrl = streamVideo.src;
-      if (isValidVideoUrl(streamUrl)) {
-        console.log(`[TeleDown] Got stream URL from document`);
-        return streamUrl;
+    // Check 2: any NEW video with stream URL in document
+    const streamVideos = document.querySelectorAll<HTMLVideoElement>('video[src*="stream/"]');
+    for (const sv of streamVideos) {
+      if (sv.src && isValidVideoUrl(sv.src) && !existingStreamUrls.has(sv.src)) {
+        console.log(`[TeleDown] Got NEW stream URL from document`);
+        return sv.src;
       }
     }
 
     // Check 3: inline video in the bubble (fallback)
     const url = tryGetVideoUrl(container);
-    if (url) {
+    if (url && !existingStreamUrls.has(url)) {
       return url;
     }
 
@@ -465,7 +476,7 @@ export async function triggerVideoLoad(container: HTMLElement): Promise<string |
       const viewerOpen = !!document.querySelector('.media-viewer-whole');
       const allVideos = document.querySelectorAll('video');
       const videoSrcs = Array.from(allVideos).map(v => v.src || v.currentSrc || '(none)').join(', ');
-      console.log(`[TeleDown] After 2s: viewerOpen=${viewerOpen}, videoCount=${allVideos.length}, srcs=[${videoSrcs}]`);
+      console.log(`[TeleDown] After 2s: viewerOpen=${viewerOpen}, videos=${allVideos.length}, srcs=[${videoSrcs}], existing=[${[...existingStreamUrls].join(', ')}]`);
     }
   }
 

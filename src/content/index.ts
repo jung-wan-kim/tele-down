@@ -21,6 +21,7 @@ import {
   updateControlPanel,
   setControlPanelCallbacks,
   type PanelState,
+  type ButtonState,
 } from './ui';
 import type { ExtensionSettings } from '../types/messages';
 import { DEFAULT_SETTINGS } from '../types/messages';
@@ -257,7 +258,14 @@ function onVideosDetected(videos: DetectedVideo[]): void {
     (v) => v.durationSeconds === undefined || v.durationSeconds >= MIN_DURATION_SECONDS,
   );
   if (longVideos.length > 0) {
-    injectDownloadButtons(longVideos);
+    // Pass current state so re-created buttons show correct progress/status
+    const stateMap = new Map<string, ButtonState>();
+    for (const item of videoQueue.values()) {
+      if (item.status !== 'pending') {
+        stateMap.set(item.videoId, { status: item.status, progress: item.progress });
+      }
+    }
+    injectDownloadButtons(longVideos, stateMap);
   }
 
   showControlPanel(computePanelState());
